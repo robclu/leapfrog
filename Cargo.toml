@@ -1,0 +1,17 @@
+[package]
+name = "leapfrog"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rob Clucas <robjclucas@gmail.com>"]
+license = "Simplified BSD"
+
+readme = "README.md"
+description = "Rust port of Jeff Preshing's Leapfrog Map"
+repository = "https://github.com/robclu/leapfrog"
+
+keywords = ["hashmap","concurrent","map"]
+categories = ["concurrency", "data-structures"]
+
+
+[dev-dependencies]
+rand = "0.8.4"
