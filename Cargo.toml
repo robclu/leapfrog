@@ -12,6 +12,9 @@ repository = "https://github.com/robclu/leapfrog"
 keywords = ["hashmap","concurrent","map"]
 categories = ["concurrency", "data-structures"]
 
+[dependencies]
+atomic = "0.5.1"
 
 [dev-dependencies]
 rand = "0.8.4"
+core_affinity = "0.5.10"

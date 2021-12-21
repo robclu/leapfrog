@@ -8,20 +8,25 @@
 //! Module for hash related functionality, such as efficient hash functions,
 //! and single-threaded and concurrent hash maps.
 
+#![feature(allocator_api)]
 #![feature(const_fn_trait_bound)]
 
 pub mod hashmap;
+pub mod leapfrogmap;
 mod util;
 
 use crate::util::load_u64_le;
 use std::borrow::Borrow;
 use std::{
     default::Default,
+    fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
 };
 
+pub use hashmap::HashMap;
+
 /// Trait which represents a value which can be stored in a map.
-pub trait Value: Default + Sized + PartialEq + Clone + Copy {
+pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
     /// Returns the null value for the value.
     fn null() -> Self;
 
