@@ -27,28 +27,17 @@ pub use hashmap::HashMap;
 
 /// Trait which represents a value which can be stored in a map.
 pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
-    /// Returns the null value for the value.
-    fn null() -> Self;
-
     /// Returns the value used for redirection.
     fn redirect() -> Self;
 }
 
 impl Value for u32 {
-    fn null() -> u32 {
-        u32::default()
-    }
-
     fn redirect() -> u32 {
         u32::MAX
     }
 }
 
 impl Value for u64 {
-    fn null() -> u64 {
-        u64::default()
-    }
-
     fn redirect() -> u64 {
         u64::MAX
     }
