@@ -12,6 +12,9 @@ repository = "https://github.com/robclu/leapfrog"
 keywords = ["hashmap","concurrent","map"]
 categories = ["concurrency", "data-structures"]
 
+[profile.release]
+debug = true
+
 [dependencies]
 atomic = "0.5.1"
 

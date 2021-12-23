@@ -1,5 +1,5 @@
 use crate::util::round_to_pow2;
-use crate::{make_hash, MurmurHasher, Value};
+use crate::{make_hash, FnvHasher, MurmurHasher, Value};
 use atomic::Atomic;
 use std::alloc::{Allocator, Global, Layout};
 use std::borrow::Borrow;
@@ -175,6 +175,43 @@ where
     }
 }
 
+/// Allocates `bucket_count` buckets using the given allocator
+fn allocate_table<K, V, A>(allocator: &A) -> *mut Table<K, V>
+where
+    A: Allocator,
+{
+    let size = std::mem::size_of::<Table<K, V>>();
+    let align = std::mem::align_of::<Table<K, V>>();
+
+    // We unwrap here because we want to panic if we fail to get a valid layout
+    let layout = Layout::from_size_align(size, align).unwrap();
+
+    // Again, unwrap the allocation result, because we should never fail to
+    // allocate.
+    let ptr = allocator.allocate(layout).unwrap().as_ptr() as *mut Table<K, V>;
+    ptr
+}
+
+/// Deallocates `bucket_count` buckets using the given allocator
+fn deallocate_table<K, V, A>(allocator: &A, table_ptr: *mut Table<K, V>)
+where
+    A: Allocator,
+{
+    let size = std::mem::size_of::<Table<K, V>>();
+    let align = std::mem::align_of::<Table<K, V>>();
+
+    // We unwrap here because we want to panic if we fail to get a valid layout
+    let layout = Layout::from_size_align(size, align).unwrap();
+
+    // Again, unwrap the non-null so that if we try to deallocate a null ptr
+    // then this panics.
+    let raw_ptr = table_ptr as *mut u8;
+    let ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
+    unsafe {
+        allocator.deallocate(ptr, layout);
+    }
+}
+
 /// Defines the result of an insert into a [LeapfrogMap].
 pub(super) enum ConcurrentInsertResult<V> {
     /// The insertion found a cell for the key, replaced the old value with
@@ -190,6 +227,25 @@ pub(super) enum ConcurrentInsertResult<V> {
     /// so we overflowed the max delta value and need to move the map to
     /// a larger table.
     Overflow(usize),
+}
+
+struct Table<K, V> {
+    buckets: *mut Bucket<K, V>,
+    size_mask: usize,
+}
+
+impl<K, V> Table<K, V> {
+    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+    }
+
+    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+    }
+
+    pub fn size(&self) -> usize {
+        self.size_mask + 1
+    }
 }
 
 /// A concurrent HashMap implementation which uses a modified form of RobinHood/
@@ -209,33 +265,40 @@ pub(super) enum ConcurrentInsertResult<V> {
 ///
 /// This version *is* thread-safe, and items cana be added and removed from
 /// any number of threads concurrently.
-pub struct LeapfrogMap<K, V, H = BuildHasherDefault<MurmurHasher>, A: Allocator = Global> {
+pub struct LeapfrogMap<K, V, H = BuildHasherDefault<FnvHasher>, A: Allocator = Global> {
     /// Pointer to the buckets for the map. This needs to be a pointer to that
     /// we can atomically get the buckets for operations, since when the map
     /// is resized the buckets might change, and we need to ensure that all
     /// operations can identify if they have the correct buckets.
-    buckets: AtomicPtr<Bucket<K, V>>,
+    table: AtomicPtr<Table<K, V>>,
     /// Mask for the size of the table.
-    size_mask: AtomicUsize,
+    //size_mask: AtomicUsize,
     /// The hasher for the map.
     hash_builder: H,
     /// Alloctor for the buckets.
     allocator: A,
-    /// Map migration flag.
-    migration_flag: AtomicBool,
     /// Migrator for moving buckets into larger storage.
     migrator: AtomicPtr<Migrator<K, V>>,
 }
 
-impl<K, V, H, A: Allocator> LeapfrogMap<K, V, H, A> {
+impl<'a, K, V, H, A: Allocator> LeapfrogMap<K, V, H, A> {
     /// Gets the capacity of the hash map.
     pub fn capacity(&self) -> usize {
-        self.size_mask.load(Ordering::Relaxed) + 1
+        self.get_table(Ordering::Relaxed).size()
+        //self.size_mask.load(Ordering::Relaxed) + 1
     }
 
     /// Gets the number of buckets in the map.
     fn bucket_count(&self) -> usize {
-        (self.size_mask.load(Ordering::Relaxed) + 1) >> 2
+        self.get_table(Ordering::Relaxed).size() >> 2
+    }
+
+    fn get_table(&self, ordering: Ordering) -> &'a Table<K, V> {
+        unsafe { &*self.table.load(ordering) }
+    }
+
+    fn get_table_mut(&self, ordering: Ordering) -> &'a mut Table<K, V> {
+        unsafe { &mut *self.table.load(ordering) }
     }
 }
 
@@ -275,8 +338,9 @@ where
     /// The number of cells to use to estimate if the map is full.
     const CELLS_IN_USE: usize = Self::LINEAR_SEARCH_LIMIT >> 1;
 
-    /// The number of muckets to migrate as a unit.
-    const MIGRATION_UNIT_SIZE: usize = 32;
+    /// The number of muckets to migrate as a unit. Larger sizes tend to perform
+    /// better, but this also depends on the map size.
+    const MIGRATION_UNIT_SIZE: usize = 128;
 
     /// Creates the hash map with space for the default number of elements, using
     /// the provided `allocator` to allocate data for the map.
@@ -292,14 +356,15 @@ where
     /// * `capacity`  - The number of elements the map should be created to hold.
     /// * `allocator` - The allocator for the map.
     pub fn with_capacity_in(capacity: usize, allocator: A) -> LeapfrogMap<K, V, H, A> {
-        let bucket_ptr = Self::allocate_and_init_buckets(&allocator, capacity);
         let migrator_ptr = allocate_migrator(&allocator);
+        let migrator = unsafe { &mut *migrator_ptr };
+        migrator.initialize();
+
+        let table_ptr = Self::allocate_and_init_table(&allocator, capacity);
         LeapfrogMap {
-            buckets: AtomicPtr::new(bucket_ptr),
-            size_mask: AtomicUsize::new(capacity - 1),
+            table: AtomicPtr::new(table_ptr),
             hash_builder: H::default(),
             allocator,
-            migration_flag: AtomicBool::new(false),
             migrator: AtomicPtr::new(migrator_ptr),
         }
     }
@@ -444,8 +509,9 @@ where
         debug_assert!(hash != HashedKey::default());
 
         loop {
-            let buckets = self.bucket_slice_mut(Ordering::Acquire);
-            let size_mask = self.size_mask.load(Ordering::Relaxed);
+            let table = self.get_table_mut(Ordering::Acquire);
+            let size_mask = table.size_mask;
+            let buckets = table.bucket_slice_mut();
 
             if let Some(cell) = self.find_inner(hash, buckets, size_mask) {
                 if cell.value.load(Ordering::Acquire) != V::redirect() {
@@ -480,7 +546,6 @@ where
         if hash == probe_hash {
             return Some(&cell);
         } else if probe_hash == HashedKey::default() {
-            println!("Hash is default");
             return None;
         }
 
@@ -524,43 +589,39 @@ where
             // but we don't have that, so we use Acquire instead. For most platforms
             // the impact should be negligible, however, that mught not be the case
             // for ARM, so we should check this for those platforms.
-            let buckets = self.bucket_slice_mut(Ordering::Acquire);
-            let size_mask = self.size_mask.load(Ordering::Relaxed);
+            let table = self.get_table_mut(Ordering::Acquire);
+            let size_mask = table.size_mask;
+            let buckets = table.bucket_slice_mut();
+            //let buckets = self.bucket_slice_mut(Ordering::Acquire);
+            //let size_mask = self.size_mask.load(Ordering::Relaxed);
 
-            //match Self::insert_or_find(hash, value, buckets, size_mask) {
             match Self::insert_or_find(hash, value, buckets, size_mask) {
                 ConcurrentInsertResult::Overflow(overflow_index) => {
                     // Try and create the table migration. Only a single thread
                     // should do this. Any threads which don't get the flag should
                     // start cleaning up old tables which have not been deallocated.
                     let mut migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
-                    if !migrator.in_process() {
-                        if self.acquire_migration_flag() {
-                            Self::initialize_migrator(
-                                &self.allocator,
-                                &mut migrator,
-                                buckets,
-                                size_mask,
-                                overflow_index,
-                            );
-                            self.release_migration_flag();
-                        } else {
-                            // Clean up old migration tables ...
+                    if migrator.set_initialization_flag() {
+                        Self::initialize_migrator(
+                            &self.allocator,
+                            &mut migrator,
+                            &self.table,
+                            overflow_index,
+                        );
+                        migrator.set_initialization_complete_flag();
+                    } else {
+                        // Clean up old migration tables ...
 
-                            // Wait for migrator to be created ...
-                            while self.migration_flag.load(Ordering::Relaxed) {
-                                std::hint::spin_loop();
-                            }
-                        }
+                        // Wait for migrator to be created ...
+                        //while !migrator.initialization_complete() {
+                        //    std::hint::spin_loop();
+                        // }
                     }
 
-                    // Migration is created, all threads can see updates, now migrate:
-                    Self::perform_migration(
-                        &self.allocator,
-                        migrator,
-                        &self.buckets,
-                        &self.size_mask,
-                    );
+                    // Migration is created, all threads can see that try and migrate.
+                    if migrator.initialization_complete() {
+                        Self::perform_migration(&self.allocator, migrator, &self.table);
+                    }
                 }
                 ConcurrentInsertResult::Replaced(old_value) => {
                     return Some(old_value);
@@ -578,20 +639,6 @@ where
         }
     }
 
-    /// Acquires the flag which indicates that the migrator is being created. This
-    /// returns true if the flag was acquired.
-    fn acquire_migration_flag(&self) -> bool {
-        self.migration_flag
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .map_or(false, |_| true)
-    }
-
-    /// Releases the migration flag, this should be called by the thread which
-    /// successfully acquired the migration flag.
-    fn release_migration_flag(&self) {
-        self.migration_flag.store(false, Ordering::Release);
-    }
-
     /// Creates the `migrator`, which is used to migrate from the old `buckets`. Only
     /// a single thread must do this, so `acquire_migration_flag` should be called
     /// prior to calling this, and then this must only be called by the thread which
@@ -607,15 +654,19 @@ where
     fn initialize_migrator(
         allocator: &A,
         migrator: &mut Migrator<K, V>,
-        buckets: &mut [Bucket<K, V>],
-        size_mask: usize,
+        table: &AtomicPtr<Table<K, V>>,
         overflow_index: usize,
     ) {
+        let src_table_ptr = table.load(Ordering::Relaxed);
+        let src_table = unsafe { &*src_table_ptr };
+        let src_buckets = src_table.bucket_slice();
+        let size_mask = src_table.size_mask;
+
         // As above, only a single thread should do this to avoid contention
         let mut index = overflow_index - Self::CELLS_IN_USE;
         let mut cells_in_use = 0;
         for _ in 0..Self::CELLS_IN_USE {
-            let cell = get_cell(buckets, index, size_mask);
+            let cell = get_cell(src_buckets, index, size_mask);
             if cell.value.load(Ordering::Relaxed) != V::default() {
                 cells_in_use += 1;
             }
@@ -625,27 +676,31 @@ where
         // Estimate how much we need to resize by:
         let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
         let in_use_estimated = (size_mask + 1) as f32 * ratio;
-        let estimated = round_to_pow2((in_use_estimated * 2.0) as usize);
-        let new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
+        let estimated = round_to_pow2((in_use_estimated * 2.0).max(1.0) as usize);
+
+        // FIXME: This doesn't allow the map to shrink
+        let new_table_size = estimated.max((size_mask + 1) as usize);
 
         // Migrator initialization:
-        migrator.dst_buckets.store(
-            Self::allocate_and_init_buckets(&allocator, new_table_size),
-            Ordering::Relaxed,
-        );
-        migrator.dst_size_mask = new_table_size - 1;
-        migrator.status.store(0, Ordering::SeqCst);
+        let dst_table_ptr = Self::allocate_and_init_table(&allocator, new_table_size);
+        let dst_table = unsafe { &*dst_table_ptr };
+        debug_assert!(dst_table.size_mask != 0);
+        migrator.dst_table.store(dst_table_ptr, Ordering::Relaxed);
+
+        // Zero out the status during migration, but keep the low bits for
+        // initialization status:
+        // FIXME: Move this mask ...
+        let mask: usize = 0b00000111;
+        migrator.status.fetch_and(mask, Ordering::Relaxed);
         migrator
             .remaining_units
             .store(Self::remaining_units(size_mask), Ordering::Relaxed);
         migrator.overflowed.store(false, Ordering::Relaxed);
         migrator.num_source_tables.store(1, Ordering::Relaxed);
 
-        let source_ptr = &mut buckets[0] as *mut Bucket<K, V>;
         let source = MigrationSource::<K, V> {
-            buckets: AtomicPtr::new(source_ptr),
+            table: AtomicPtr::new(src_table_ptr),
             index: AtomicUsize::new(0),
-            size_mask,
         };
         if migrator.sources.len() < 1 {
             migrator.sources.push(source);
@@ -658,17 +713,22 @@ where
     fn participate_in_migration(&self) {
         let migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
 
+        // Nothing to do here ...
+        if !migrator.in_process() {
+            //debug_assert!(false);
+            return;
+        }
+
         // First check if that migration is in the completion stage,
         // in which case we should go and clean up some of the old
         // migration tables.
-        if migrator.finishing() {
+        if migrator.finishing() || (migrator.in_process() && !migrator.initialization_complete()) {
             // Clean up old tables, then return ...
-
             return;
         }
 
         // Otherwise we need to join in the migration;
-        Self::perform_migration(&self.allocator, migrator, &self.buckets, &self.size_mask);
+        Self::perform_migration(&self.allocator, migrator, &self.table); //&self.buckets, &self.size_mask);
     }
 
     /// Perfoms migration using the `migrator`. When the migration is successful,
@@ -684,8 +744,9 @@ where
     fn perform_migration(
         allocator: &A,
         migrator: &mut Migrator<K, V>,
-        dst_bucket_ptr: &AtomicPtr<Bucket<K, V>>,
-        dst_size_mask: &AtomicUsize,
+        dst_table: &AtomicPtr<Table<K, V>>,
+        //dst_bucket_ptr: &AtomicPtr<Bucket<K, V>>,
+        //dst_size_mask: &AtomicUsize,
     ) {
         // Increment the number of workers for the migrator.
         let mut status = migrator.status.load(Ordering::Relaxed);
@@ -694,11 +755,11 @@ where
                 // Migration is finished, we can break
                 return;
             }
-            // Last bit is flag for completion, hence + 2:
-            match migrator.status.compare_exchange_weak(
+            // Last bit is flag for completion, hence + 8:
+            match migrator.status.compare_exchange(
                 status,
-                status + 2,
-                Ordering::AcqRel,
+                status + 8,
+                Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
@@ -753,23 +814,20 @@ where
             }
         }
 
-        // We are the last thread here, but we get into the migration before
-        // it was finished, but then it finished, so we did nothing and can
-        // just return.
-        let prev_status = migrator.status.load(Ordering::Relaxed);
-        if prev_status == 2 {
-            return;
-        }
-
         // Finish the migration:
         // Decrement the status to indicate that this thread is done. We need
         // acquire release here to make all previous writes visible to the
         // last thread to reach this point, which will actually finish the
         // migration
+        let prev_status = migrator.status.fetch_sub(8, Ordering::AcqRel);
+        if prev_status >= 16 {
+            // Clean up old migrated tables until finished. This also makes the
+            // performance of inserts more stable.
+            while migrator.status.load(Ordering::Relaxed) >= 1 {
+                std::hint::spin_loop();
+            }
 
-        let prev_status = migrator.status.fetch_sub(2, Ordering::AcqRel);
-        if prev_status >= 4 {
-            // We aren't the last thread here, so we can exit.
+            // We weren't the last thread here, so we can exit.
             return;
         }
 
@@ -777,44 +835,48 @@ where
         // The status still indicates that a migration is being performed, so
         // other threads will be able to see that the migration is still in
         // progress but is in the completion stage.
-        debug_assert!(prev_status == 3);
+        debug_assert!(prev_status == 15);
         if migrator.overflowed.load(Ordering::Relaxed) {
             // Overflow of destination table, move the destination table to be
             // a source in the migrator, create a new destination table, and
             // then break so that we can try again:
-            let buckets = migrator.dst_buckets.load(Ordering::Relaxed);
-            let size_mask = migrator.dst_size_mask;
+            let table_ptr = migrator.dst_table.load(Ordering::Relaxed);
+            let table = unsafe { &*table_ptr };
 
-            let mut remaining_units = Self::remaining_units(size_mask);
+            let mut remaining_units = Self::remaining_units(table.size_mask);
             for source in &migrator.sources {
-                remaining_units += Self::remaining_units(source.size_mask);
+                remaining_units += Self::remaining_units(source.size());
                 source.index.store(0, Ordering::Relaxed);
             }
 
             migrator.sources.push(MigrationSource {
-                buckets: AtomicPtr::new(buckets),
+                table: AtomicPtr::new(table_ptr),
                 index: AtomicUsize::new(0),
-                size_mask,
             });
 
             migrator
                 .remaining_units
                 .store(remaining_units, Ordering::Relaxed);
 
-            // Create the new buckets for the migrator:
-            migrator.dst_buckets.store(
-                Self::allocate_and_init_buckets(&allocator, (size_mask + 1) * 2),
-                Ordering::Relaxed,
-            );
-            migrator.dst_size_mask = (size_mask + 1) * 2 - 1;
+            // Create the new table for the migrator:
+            let new_dst_table_ptr =
+                Self::allocate_and_init_table(&allocator, (table.size_mask + 1) * 2);
+            migrator
+                .dst_table
+                .store(new_dst_table_ptr, Ordering::Relaxed);
 
             // Finally we can set that we are done!
-            let current = migrator.status.load(Ordering::Relaxed);
-            migrator.status.fetch_and(current - 1, Ordering::Release);
+            migrator.status.store(0, Ordering::Relaxed);
         } else {
             // Migration was successful, we can update the migrator. Here
             // we only set the variables which we need to:
+            let new_table_ptr = migrator.dst_table.load(Ordering::Relaxed);
+            dst_table.store(new_table_ptr, Ordering::Release);
+
             migrator.overflowed.store(false, Ordering::Relaxed);
+            migrator
+                .dst_table
+                .store(std::ptr::null_mut(), Ordering::Relaxed);
 
             // FIXME: Move the source buckets into the cleanup queue:
             for i in 0..num_sources {
@@ -824,19 +886,8 @@ where
                 // ...
             }
 
-            // Swap the bucket pointer for the new map
-            dst_size_mask.store(migrator.dst_size_mask, Ordering::Relaxed);
-            dst_bucket_ptr.store(
-                migrator.dst_buckets.load(Ordering::Relaxed),
-                Ordering::Release,
-            );
-            migrator
-                .dst_buckets
-                .store(std::ptr::null_mut(), Ordering::Relaxed);
-
             // Finally we can set that we are done!
-            let current = migrator.status.load(Ordering::Relaxed);
-            migrator.status.fetch_and(current - 1, Ordering::Release);
+            migrator.status.store(0, Ordering::Relaxed);
         }
     }
 
@@ -872,7 +923,7 @@ where
     pub(super) fn insert_or_find(
         hash: HashedKey,
         value: V,
-        buckets: &mut [Bucket<K, V>],
+        buckets: &[Bucket<K, V>],
         size_mask: usize,
     ) -> ConcurrentInsertResult<V> {
         let mut index = hash as usize;
@@ -880,7 +931,7 @@ where
         // Start by checking the hashed cell. It's quite unlikely that it belongs
         // to the bucket it hashes to, but this is fast if it does.
         {
-            let cell = get_cell_mut(buckets, index, size_mask);
+            let cell = get_cell(buckets, index, size_mask);
             let probe_hash = cell.hash.load(Ordering::Relaxed);
 
             if probe_hash == HashedKey::default() {
@@ -930,7 +981,7 @@ where
                 // Update the delta value for the next iteration:
                 probe_delta = get_second_delta(buckets, index, size_mask).load(Ordering::Relaxed);
 
-                let cell = get_cell_mut(buckets, index, size_mask);
+                let cell = get_cell(buckets, index, size_mask);
                 let mut probe_hash = cell.hash.load(Ordering::Relaxed);
                 if probe_hash == HashedKey::default() {
                     // The cell has been linked to the probe chain, but the hash
@@ -1011,7 +1062,6 @@ where
                     // Check for the same hash, so we can replace:
                     let x = hash ^ probe_hash;
                     if x == 0 {
-                        println!("Found same hash: {} {} {:b}", hash, probe_hash, x);
                         let old_value = cell.value.load(Ordering::Relaxed);
                         return Self::exchange_value(cell, value, old_value);
                     }
@@ -1025,10 +1075,10 @@ where
                         // fail.
                         let offset = (index - prev_link_index) as u8;
                         if first_delta {
-                            get_first_delta_mut(buckets, prev_link_index, size_mask)
+                            get_first_delta(buckets, prev_link_index, size_mask)
                                 .store(offset, Ordering::Relaxed);
                         } else {
-                            get_second_delta_mut(buckets, prev_link_index, size_mask)
+                            get_second_delta(buckets, prev_link_index, size_mask)
                                 .store(offset, Ordering::Relaxed);
                         }
 
@@ -1075,7 +1125,7 @@ where
         if exchange_result.is_ok() {
             // Success, we can return the old value
             if old_value == V::default() {
-                println!("Exchange");
+                //                println!("Exchange");
                 return ConcurrentInsertResult::NewInsert;
             } else {
                 return ConcurrentInsertResult::Replaced(old_value);
@@ -1101,7 +1151,8 @@ where
 
     /// Allocates and initializes buckets which will hold `cells` number of
     /// cells, using the provided `allocator`.
-    fn allocate_and_init_buckets(allocator: &A, cells: usize) -> *mut Bucket<K, V> {
+    //fn allocate_and_init_buckets(allocator: &A, cells: usize) -> *mut Bucket<K, V> {
+    fn allocate_and_init_table(allocator: &A, cells: usize) -> *mut Table<K, V> {
         assert!(cells >= 4 && (cells % 2 == 0));
         let bucket_count = cells >> 2;
         let bucket_ptr = allocate_buckets(&allocator, bucket_count);
@@ -1127,25 +1178,35 @@ where
             }
         }
 
-        bucket_ptr
+        let table_ptr = allocate_table(&allocator);
+        let table = unsafe { &mut *table_ptr };
+
+        table.buckets = bucket_ptr;
+        table.size_mask = cells - 1;
+
+        table_ptr
     }
 
     /// Create a mutable slice of buckets from a pointer to the buckets and the
     /// number of buckets.
     #[inline]
     fn bucket_slice_mut(&self, ordering: Ordering) -> &'a mut [Bucket<K, V>] {
-        let buckets = self.buckets.load(ordering);
-        let len = self.bucket_count();
-        unsafe { std::slice::from_raw_parts_mut(buckets, len) }
+        self.get_table_mut(ordering).bucket_slice_mut()
+
+        //        let buckets = self.buckets.load(ordering);
+        //        let len = self.bucket_count();
+        //        unsafe { std::slice::from_raw_parts_mut(buckets, len) }
     }
 
     /// Create a slice of buckets from a pointer to the buckets and the number
     /// of buckets.
     #[inline]
     fn bucket_slice(&self, ordering: Ordering) -> &'a [Bucket<K, V>] {
-        let buckets = self.buckets.load(ordering);
-        let len = self.bucket_count();
-        unsafe { std::slice::from_raw_parts(buckets, len) }
+        self.get_table(ordering).bucket_slice()
+
+        //let buckets = self.buckets.load(ordering);
+        //let len = self.bucket_count();
+        //unsafe { std::slice::from_raw_parts(buckets, len) }
     }
 
     #[inline]
@@ -1167,6 +1228,24 @@ fn get_cell<K, V: Value>(
 ) -> &AtomicCell<V> {
     let bucket_index = get_bucket_index(index, size_mask);
     let cell_index = get_cell_index(index);
+    if bucket_index >= buckets.len() {
+        println!(
+            "BI {:?} {} {} {}",
+            std::thread::current().id(),
+            bucket_index,
+            buckets.len(),
+            size_mask
+        )
+    }
+    if cell_index >= 7 {
+        println!(
+            "CI {:?} {} {} {}",
+            std::thread::current().id(),
+            bucket_index,
+            buckets.len(),
+            size_mask
+        )
+    }
     &buckets[bucket_index].cells[cell_index]
 }
 
@@ -1279,9 +1358,14 @@ const fn get_cell_index(index: usize) -> usize {
 
 impl<K, V, H, A: Allocator> Drop for LeapfrogMap<K, V, H, A> {
     fn drop(&mut self) {
-        let bucket_ptr = self.buckets.load(Ordering::SeqCst);
-        let bucket_count = self.bucket_count();
+        let table = self.get_table_mut(Ordering::SeqCst);
+
+        let bucket_ptr = table.buckets;
+        let bucket_count = table.size() >> 2;
         deallocate_buckets(&self.allocator, bucket_ptr, bucket_count);
+
+        let table_ptr = self.table.load(Ordering::Relaxed);
+        deallocate_table(&self.allocator, table_ptr);
 
         // We don't need to deallocate the buckets for the migrator, since that
         // has already been handled.
@@ -1294,25 +1378,28 @@ impl<K, V, H, A: Allocator> Drop for LeapfrogMap<K, V, H, A> {
 /// to migrate from, and the index in the source table.
 struct MigrationSource<K, V> {
     /// The source buckets to migrate from.
-    buckets: AtomicPtr<Bucket<K, V>>,
+    //buckets: AtomicPtr<Bucket<K, V>>,
+    table: AtomicPtr<Table<K, V>>,
     /// The index of the source.
     index: AtomicUsize,
-    /// The size mask for the bucket to migrate.
-    size_mask: usize,
+    // The size mask for the bucket to migrate.
+    //size_mask: usize,
 }
 
 impl<K, V> MigrationSource<K, V> {
-    pub const fn size(&self) -> usize {
-        self.size_mask + 1
+    pub fn size(&self) -> usize {
+        let table = unsafe { &*self.table.load(Ordering::Relaxed) };
+        table.size_mask + 1
     }
 }
 
 /// A struct which migrates the storage for a [ConcurrentHashMap].
 struct Migrator<K, V> {
     /// Pointer to the destination buckets to migrate to.
-    dst_buckets: AtomicPtr<Bucket<K, V>>,
+    //dst_buckets: AtomicPtr<Bucket<K, V>>,
     /// Size mask for the destination:
-    dst_size_mask: usize,
+    //dst_size_mask: usize,
+    dst_table: AtomicPtr<Table<K, V>>,
     /// Sources to migrate from.
     sources: Vec<MigrationSource<K, V>>,
     /// Number of worker threads and a flag for migration completion.
@@ -1327,26 +1414,54 @@ struct Migrator<K, V> {
 
 impl<K, V: Value> Migrator<K, V> {
     /// Creates a new table migrator.
-    pub fn new() -> Migrator<K, V> {
-        Migrator {
-            dst_buckets: AtomicPtr::new(std::ptr::null_mut()),
-            dst_size_mask: 0,
-            sources: vec![],
-            status: AtomicUsize::new(0),
-            remaining_units: AtomicUsize::new(0),
-            overflowed: AtomicBool::new(false),
-            num_source_tables: AtomicU32::new(0),
+    pub fn initialize(&mut self) {
+        self.dst_table
+            .store(std::ptr::null_mut(), Ordering::Relaxed);
+        self.sources = vec![];
+        self.status.store(0, Ordering::Relaxed);
+        self.remaining_units.store(0, Ordering::Relaxed);
+        self.overflowed.store(false, Ordering::Relaxed);
+        self.num_source_tables.store(0, Ordering::Relaxed);
+    }
+
+    /// Acquires the flag which indicates that the migrator is being created. This
+    /// returns true if the flag was acquired.
+    fn set_initialization_flag(&self) -> bool {
+        let old = self.status.fetch_or(2, Ordering::Relaxed);
+        // If we were the ones to set the flag
+        if old & 2 == 0 {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sets that the initialization process is complete.
+    fn set_initialization_complete_flag(&self) -> bool {
+        let old = self.status.fetch_or(4, Ordering::Relaxed);
+        // If we were the ones to set the flag
+        if old & 4 == 0 {
+            true
+        } else {
+            false
         }
     }
 
     /// If the migrator has completed/is completing the migration.
     pub fn finishing(&self) -> bool {
-        self.status.load(Ordering::Relaxed) & 1 == 1
+        let status = self.status.load(Ordering::Relaxed);
+        status & 1 == 1 || status == 0
     }
 
-    /// If the migrator is in process.
+    /// If the migrator has completed initialization
+    pub fn initialization_complete(&self) -> bool {
+        self.status.load(Ordering::Relaxed) & 6 == 6
+    }
+
+    /// If the migrator is in process from the time the initialization flag
+    /// is set.
     pub fn in_process(&self) -> bool {
-        self.status.load(Ordering::Relaxed) != 0
+        self.status.load(Ordering::Relaxed) & 2 == 2
     }
 
     /// Performs the migration of a range of the buckets.
@@ -1362,18 +1477,23 @@ impl<K, V: Value> Migrator<K, V> {
         A: Allocator,
     {
         let source = &self.sources[src_index];
-        let src_size_mask = source.size_mask;
-        let src_bucket_ptr = source.buckets.load(Ordering::Relaxed);
-        let src_buckets =
-            unsafe { std::slice::from_raw_parts_mut(src_bucket_ptr, (src_size_mask + 1) >> 2) };
+        let src_table = unsafe { &*source.table.load(Ordering::Relaxed) };
+        let src_size_mask = src_table.size_mask;
+        let src_buckets = src_table.bucket_slice();
 
-        let dst_size_mask = self.dst_size_mask;
-        let dst_bucket_ptr = self.dst_buckets.load(Ordering::Relaxed);
-        let dst_buckets =
-            unsafe { std::slice::from_raw_parts_mut(dst_bucket_ptr, (dst_size_mask + 1) >> 2) };
+        //        let src_bucket_ptr = source.buckets.load(Ordering::Relaxed);
+        //        let src_buckets =
+        //            unsafe { std::slice::from_raw_parts_mut(src_bucket_ptr, (src_size_mask + 1) >> 2) };
+
+        let dst_table = unsafe { &*self.dst_table.load(Ordering::Relaxed) };
+        let dst_size_mask = dst_table.size_mask;
+        let dst_buckets = dst_table.bucket_slice();
+        //        let dst_bucket_ptr = self.dst_buckets.load(Ordering::Relaxed);
+        //        let dst_buckets =
+        //            unsafe { std::slice::from_raw_parts_mut(dst_bucket_ptr, (dst_size_mask + 1) >> 2) };
 
         for index in start_index..end_index {
-            let cell = get_cell_mut(src_buckets, index, src_size_mask);
+            let cell = get_cell(src_buckets, index, src_size_mask);
 
             loop {
                 let src_hash = cell.hash.load(Ordering::Relaxed);
@@ -1488,8 +1608,8 @@ mod tests {
     use rand::{thread_rng, Rng};
     use std::sync::Arc;
 
-    const NUM_THREADS: u64 = 8;
-    const KEYS_TO_INSERT: u64 = (1 << (NUM_THREADS)) / NUM_THREADS;
+    const NUM_THREADS: u64 = 16;
+    const KEYS_TO_INSERT: u64 = (1 << (NUM_THREADS + 9)) / NUM_THREADS;
 
     fn insert_keys(
         map: &Arc<LeapfrogMap<u64, u64>>,
@@ -1504,18 +1624,17 @@ mod tests {
             let key = index.wrapping_mul(relative_prime);
             let key = key ^ (key >> 16);
             if key != u64::default() && key != u64::MAX {
-                println!("Insert: {}", key);
                 match map.insert(key, key) {
                     Some(old) => {
                         //replaced_checksum = replaced_checksum.wrapping_add(key);
                         checksum = checksum.wrapping_sub(old);
                         checksum = checksum.wrapping_add(key);
                         // Replaced key, which obviously should not happen:
-                        println!("Replaced Key {} {}", key, old);
+                        //println!("Replaced Key {} {}", key, old);
                         //assert!(key == 0);
                     }
                     None => {
-                        println!("Insert success: {}", key);
+                        //println!("Insert success: {}", key);
                         checksum = checksum.wrapping_add(key);
                     }
                 }
@@ -1538,13 +1657,12 @@ mod tests {
             let key = index.wrapping_mul(relative_prime);
             let key = key ^ (key >> 16);
             if key != u64::default() && key != u64::MAX {
-                println!("Remove key: {}", key);
                 match map.get(&key) {
                     Some(value_ref) => {
                         // Replaced key .
                         match value_ref.value() {
                             Some(v) => {
-                                println!("Founnd: {} {}", key, v);
+                                //println!("Founnd: {} {}", key, v);
                                 checksum = checksum.wrapping_add(v);
                             }
                             None => {
@@ -1557,7 +1675,7 @@ mod tests {
                     None => {
                         not_found_checksum = not_found_checksum.wrapping_add(key);
                         // Key not found in map, but it should be
-                        println!("Not Found : {}", key);
+                        //println!("Not Found : {}", key);
                         //assert!(key == 0);
                     }
                 }
@@ -1589,7 +1707,7 @@ mod tests {
     #[test]
     fn insert_different_keys() {
         let leapfrog_map = Arc::new(LeapfrogMap::<u64, u64>::with_capacity(
-            KEYS_TO_INSERT as usize,
+            1 << 24, //KEYS_TO_INSERT as usize,
         ));
 
         let mut rng = thread_rng();
