@@ -229,8 +229,12 @@ pub(super) enum ConcurrentInsertResult<V> {
     Overflow(usize),
 }
 
+/// Table for the map, storing buckets and the mask for the number of cells in
+/// the table.
 struct Table<K, V> {
+    /// Pointer to the buckets for the table.
     buckets: *mut Bucket<K, V>,
+    /// The mask for indexing into the buckets.
     size_mask: usize,
 }
 
@@ -271,8 +275,6 @@ pub struct LeapfrogMap<K, V, H = BuildHasherDefault<FnvHasher>, A: Allocator = G
     /// is resized the buckets might change, and we need to ensure that all
     /// operations can identify if they have the correct buckets.
     table: AtomicPtr<Table<K, V>>,
-    /// Mask for the size of the table.
-    //size_mask: AtomicUsize,
     /// The hasher for the map.
     hash_builder: H,
     /// Alloctor for the buckets.
@@ -285,12 +287,6 @@ impl<'a, K, V, H, A: Allocator> LeapfrogMap<K, V, H, A> {
     /// Gets the capacity of the hash map.
     pub fn capacity(&self) -> usize {
         self.get_table(Ordering::Relaxed).size()
-        //self.size_mask.load(Ordering::Relaxed) + 1
-    }
-
-    /// Gets the number of buckets in the map.
-    fn bucket_count(&self) -> usize {
-        self.get_table(Ordering::Relaxed).size() >> 2
     }
 
     fn get_table(&self, ordering: Ordering) -> &'a Table<K, V> {
