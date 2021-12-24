@@ -588,8 +588,6 @@ where
             let table = self.get_table_mut(Ordering::Acquire);
             let size_mask = table.size_mask;
             let buckets = table.bucket_slice_mut();
-            //let buckets = self.bucket_slice_mut(Ordering::Acquire);
-            //let size_mask = self.size_mask.load(Ordering::Relaxed);
 
             match Self::insert_or_find(hash, value, buckets, size_mask) {
                 ConcurrentInsertResult::Overflow(overflow_index) => {
@@ -940,6 +938,7 @@ where
                     // and exchange the value:
                     return Self::exchange_value(cell, value, V::default());
                 }
+                // Lost the race, so likely go and search through the probe chain.
             }
 
             // Hash already in table, exchange and return the value.
@@ -964,18 +963,16 @@ where
         let max_index = index + size_mask;
         debug_assert!(max_index as i64 - index as i64 >= 0);
 
-        let mut probe_delta = get_first_delta(buckets, index, size_mask).load(Ordering::Relaxed);
-        let first_delta = if probe_delta == 0 { true } else { false };
-
+        let mut first = true;
         loop {
             let mut follow_link = false;
+            let prev_link = get_delta(buckets, index, size_mask, first);
+            let probe_delta = prev_link.load(Ordering::Relaxed);
+            first = false;
 
             // Search the probe chain for this cell:
             if probe_delta != 0 {
                 index += probe_delta as usize;
-
-                // Update the delta value for the next iteration:
-                probe_delta = get_second_delta(buckets, index, size_mask).load(Ordering::Relaxed);
 
                 let cell = get_cell(buckets, index, size_mask);
                 let mut probe_hash = cell.hash.load(Ordering::Relaxed);
@@ -1040,17 +1037,7 @@ where
                         {
                             // Now link the cell to the previous cell in the same bucket:
                             let offset = (index - prev_link_index) as u8;
-
-                            // In debug, we can perform an exchange here to get the old
-                            // value and check that it's correct, but we just store for release.
-                            if first_delta {
-                                get_first_delta(buckets, prev_link_index, size_mask)
-                                    .store(offset, Ordering::Relaxed);
-                            } else {
-                                get_second_delta(buckets, prev_link_index, size_mask)
-                                    .store(offset, Ordering::Relaxed);
-                            }
-
+                            prev_link.store(offset, Ordering::Relaxed);
                             return Self::exchange_value(cell, value, V::default());
                         }
                     }
@@ -1070,16 +1057,11 @@ where
                         // the link chain is well-formed, and subsequent lookups could
                         // fail.
                         let offset = (index - prev_link_index) as u8;
-                        if first_delta {
-                            get_first_delta(buckets, prev_link_index, size_mask)
-                                .store(offset, Ordering::Relaxed);
-                        } else {
-                            get_second_delta(buckets, prev_link_index, size_mask)
-                                .store(offset, Ordering::Relaxed);
-                        }
+                        prev_link.store(offset, Ordering::Relaxed);
 
                         // Now we need to go back to the start of the loop, and follow
-                        // the probe chain:
+                        // the probe chain from this index, now that the previous
+                        // link has the delta value set ...
                         follow_link = true;
                         break;
                     }
@@ -1121,7 +1103,6 @@ where
         if exchange_result.is_ok() {
             // Success, we can return the old value
             if old_value == V::default() {
-                //                println!("Exchange");
                 return ConcurrentInsertResult::NewInsert;
             } else {
                 return ConcurrentInsertResult::Replaced(old_value);
@@ -1276,6 +1257,19 @@ fn get_first_delta<K, V>(buckets: &[Bucket<K, V>], index: usize, size_mask: usiz
     let bucket_index = get_bucket_index(index, size_mask);
     let cell_index = get_cell_index(index);
     &buckets[bucket_index].deltas[cell_index]
+}
+
+#[inline]
+fn get_delta<K, V>(
+    buckets: &[Bucket<K, V>],
+    index: usize,
+    size_mask: usize,
+    first: bool,
+) -> &AtomicU8 {
+    let offset = if first { 0 } else { 4 };
+    let bucket_index = get_bucket_index(index, size_mask);
+    let cell_index = get_cell_index(index);
+    &buckets[bucket_index].deltas[cell_index + offset]
 }
 
 /// Gets a mutable reference to the first delta value for a cell with the
@@ -1612,32 +1606,29 @@ mod tests {
         relative_prime: u64,
         start_index: u64,
         thread_index: u64,
-    ) -> (u64, u64) {
+    ) -> u64 {
         let mut index = start_index + thread_index * (KEYS_TO_INSERT + 2);
         let mut checksum = 0u64;
-        let mut replaced_checksum = 0u64;
         for _ in 0..KEYS_TO_INSERT {
             let key = index.wrapping_mul(relative_prime);
             let key = key ^ (key >> 16);
             if key != u64::default() && key != u64::MAX {
                 match map.insert(key, key) {
                     Some(old) => {
-                        //replaced_checksum = replaced_checksum.wrapping_add(key);
-                        checksum = checksum.wrapping_sub(old);
-                        checksum = checksum.wrapping_add(key);
-                        // Replaced key, which obviously should not happen:
-                        //println!("Replaced Key {} {}", key, old);
-                        //assert!(key == 0);
+                        println!("Replaced {} {}", key, old);
+                        // This can only happen if we have generated a key which
+                        // hashes to the same value:
+                        assert!(key == old);
+                        assert!(map.hash_usize(&key) == map.hash_usize(&old));
                     }
                     None => {
-                        //println!("Insert success: {}", key);
                         checksum = checksum.wrapping_add(key);
                     }
                 }
             }
             index += 1;
         }
-        (checksum, replaced_checksum)
+        checksum
     }
 
     fn remove_keys(
@@ -1645,20 +1636,17 @@ mod tests {
         relative_prime: u64,
         start_index: u64,
         thread_index: u64,
-    ) -> (u64, u64) {
+    ) -> u64 {
         let mut index = start_index + thread_index * (KEYS_TO_INSERT + 2);
         let mut checksum = 0u64;
-        let mut not_found_checksum = 0u64;
         for _ in 0..KEYS_TO_INSERT {
             let key = index.wrapping_mul(relative_prime);
             let key = key ^ (key >> 16);
             if key != u64::default() && key != u64::MAX {
                 match map.get(&key) {
                     Some(value_ref) => {
-                        // Replaced key .
                         match value_ref.value() {
                             Some(v) => {
-                                //println!("Founnd: {} {}", key, v);
                                 checksum = checksum.wrapping_add(v);
                             }
                             None => {
@@ -1669,16 +1657,15 @@ mod tests {
                         }
                     }
                     None => {
-                        not_found_checksum = not_found_checksum.wrapping_add(key);
-                        // Key not found in map, but it should be
-                        //println!("Not Found : {}", key);
+                        // Didn't find the key, which should not happen!
+                        println!("Failed to find: {} {}", map.hash_usize(&key), key);
                         //assert!(key == 0);
                     }
                 }
             }
             index += 1;
         }
-        (checksum, not_found_checksum)
+        checksum
     }
 
     #[test]
@@ -1730,7 +1717,7 @@ mod tests {
                     std::hint::spin_loop();
                 }
                 let start = std::time::Instant::now();
-                let (local_sum, replaced) = insert_keys(&map, relative_prime, start_index, i);
+                let local_sum = insert_keys(&map, relative_prime, start_index, i);
 
                 sum.fetch_add(local_sum, Ordering::Relaxed);
                 end_flag.fetch_add(1, Ordering::Relaxed);
@@ -1738,11 +1725,10 @@ mod tests {
                 let end = std::time::Instant::now();
                 let time = (end - start).as_millis();
                 println!(
-                    "[Insert] Thread: {0:<2}, {1} ms, {2} keys/sec {3}",
+                    "[Insert] Thread: {0:<2}, {1} ms, {2} keys/sec",
                     i,
                     time,
                     KEYS_TO_INSERT as f32 * (1000 as f32 / time as f32),
-                    replaced
                 );
             }));
         }
@@ -1758,19 +1744,17 @@ mod tests {
                     std::hint::spin_loop();
                 }
                 let start = std::time::Instant::now();
-                let (local_sum, replaced) =
-                    remove_keys(&map, relative_prime, start_index, i - NUM_THREADS / 2);
+                let local_sum = remove_keys(&map, relative_prime, start_index, i - NUM_THREADS / 2);
 
                 sum.fetch_add(local_sum, Ordering::Relaxed);
 
                 let end = std::time::Instant::now();
                 let time = (end - start).as_millis();
                 println!(
-                    "[Remove] Thread: {0:<2}, {1} ms, {2} keys/sec {3}",
+                    "[Remove] Thread: {0:<2}, {1} ms, {2} keys/sec ",
                     i,
                     time,
                     KEYS_TO_INSERT as f32 * (1000 as f32 / time as f32),
-                    replaced
                 );
             }));
         }
