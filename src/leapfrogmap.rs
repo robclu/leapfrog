@@ -400,10 +400,8 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        match self.find(hash) {
-            Some(cell) => Some(RefMut { inner: &cell.value }),
-            None => None,
-        }
+        self.find(hash)
+            .map_or(None, |cell| Some(RefMut { inner: &cell.value }))
     }
 
     /// Returns true if the map contains the key.
@@ -430,14 +428,8 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        let cell = self.find(hash);
-        if cell.is_none() {
-            return None;
-        }
-
-        // Found key in map, so erase the value:
-        let cell = cell.unwrap();
-        Some(self.erase_value(cell))
+        self.find(hash)
+            .map_or(None, |cell| Some(self.erase_value(cell)))
     }
 
     /// Erases the cell from the map, returning the old value. This should only
@@ -992,7 +984,7 @@ where
                     debug_assert!((probe_hash ^ hash) as usize & size_mask == 0);
 
                     if probe_hash == hash {
-                        let old_value = cell.value.load(Ordering::Relaxed);
+                        let old_value = cell.value.load(Ordering::Acquire);
 
                         // Check if the table is being moved:
                         if old_value == V::redirect() {
@@ -1045,7 +1037,7 @@ where
                     // Check for the same hash, so we can replace:
                     let x = hash ^ probe_hash;
                     if x == 0 {
-                        let old_value = cell.value.load(Ordering::Relaxed);
+                        let old_value = cell.value.load(Ordering::Acquire);
                         return Self::exchange_value(cell, value, old_value);
                     }
 
