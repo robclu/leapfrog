@@ -12,7 +12,8 @@
 #![feature(const_fn_trait_bound)]
 
 pub mod hashmap;
-pub mod leapfrogmap;
+pub mod leapmap;
+mod leapref;
 mod util;
 
 use crate::util::load_u64_le;
@@ -24,6 +25,7 @@ use std::{
 };
 
 pub use hashmap::HashMap;
+pub use leapmap::LeapMap;
 
 /// Trait which represents a value which can be stored in a map.
 pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
