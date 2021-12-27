@@ -386,6 +386,10 @@ where
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a Some(&v) if the find succeeded, otherwise this will
     /// return None.
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The hashed value to find.
     fn find(&self, hash: HashedKey) -> Option<&V> {
         debug_assert!(hash != HashedKey::default());
 

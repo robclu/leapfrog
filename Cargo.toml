@@ -6,7 +6,7 @@ authors = ["Rob Clucas <robjclucas@gmail.com>"]
 license = "Simplified BSD"
 
 readme = "README.md"
-description = "Rust port of Jeff Preshing's Leapfrog Map"
+description = "Fast, concurrent hash map using leapfrog probing"
 repository = "https://github.com/robclu/leapfrog"
 
 keywords = ["hashmap","concurrent","map"]
