@@ -1,8 +1,8 @@
 use crate::leapref::{Ref, RefMut};
-use crate::util::round_to_pow2;
+use crate::util::{allocate, deallocate, round_to_pow2};
 use crate::{make_hash, MurmurHasher, Value};
 use atomic::Atomic;
-use std::alloc::{Allocator, Global, Layout};
+use std::alloc::{Allocator, Global};
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::sync::atomic::{
@@ -15,148 +15,7 @@ type HashedKey = u64;
 /// The atomic type of the hashed key.
 type AtomicHashedKey = AtomicU64;
 
-/// Struct which stores a cell in a concurrent hash map. A cell is simply a
-/// hash (rather than the key iteself) and the value associated with the key
-/// for which the hash is associated.
-///
-/// Here we need the value to be atomic. Since V is generic, it's possible that
-/// there is no built-in atomic support for it, in which case the `Atomic`
-/// type will fall back to using an efficient spinlock implementation.
-pub(super) struct AtomicCell<V> {
-    /// The hashed value of the cell.
-    hash: AtomicHashedKey,
-    /// The value assosciated with the hash.
-    value: Atomic<V>,
-}
-
-/// Struct which stores buckets of cells. Each bucket stores four cells
-/// and two delta values per cell. The first delta value for a cell provides
-/// the offset to the cell which is the start of the probe chain for the cell.
-/// The second delta value provides the offset to the next link in the probe
-/// chain once a search along the probe chain has started (via the first offset
-/// value).
-pub(super) struct Bucket<K, V> {
-    /// Delta values for the cells, see the above documentation for what each
-    /// delta value means.
-    deltas: [AtomicU8; 8],
-    /// Cells for the bucket.
-    cells: [AtomicCell<V>; 4],
-    /// Placeholder for the key.
-    _key: std::marker::PhantomData<K>,
-}
-
-/// Allocates `bucket_count` buckets using the given allocator
-fn allocate_buckets<K, V, A>(allocator: &A, bucket_count: usize) -> *mut Bucket<K, V>
-where
-    A: Allocator,
-{
-    let bucket_size = std::mem::size_of::<Bucket<K, V>>();
-    let bucket_align = std::mem::align_of::<Bucket<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(bucket_size * bucket_count, bucket_align).unwrap();
-
-    // Again, unwrap the allocation result, because we should never fail to
-    // allocate.
-    let bucket_ptr = allocator.allocate(layout).unwrap().as_ptr() as *mut Bucket<K, V>;
-    bucket_ptr
-}
-
-/// Deallocates `bucket_count` buckets using the given allocator
-fn deallocate_buckets<K, V, A>(allocator: &A, bucket_ptr: *mut Bucket<K, V>, bucket_count: usize)
-where
-    A: Allocator,
-{
-    let bucket_size = std::mem::size_of::<Bucket<K, V>>();
-    let bucket_align = std::mem::align_of::<Bucket<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(bucket_size * bucket_count, bucket_align).unwrap();
-
-    // Again, unwrap the non-null so that if we try to deallocate a null ptr
-    // then this panics.
-    let raw_ptr = bucket_ptr as *mut u8;
-    let ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
-    unsafe {
-        allocator.deallocate(ptr, layout);
-    }
-}
-
-/// Allocates `bucket_count` buckets using the given allocator
-fn allocate_migrator<K, V, A>(allocator: &A) -> *mut Migrator<K, V>
-where
-    A: Allocator,
-{
-    let size = std::mem::size_of::<Migrator<K, V>>();
-    let align = std::mem::align_of::<Migrator<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size, align).unwrap();
-
-    // Again, unwrap the allocation result, because we should never fail to
-    // allocate.
-    let ptr = allocator.allocate(layout).unwrap().as_ptr() as *mut Migrator<K, V>;
-    ptr
-}
-
-/// Deallocates `bucket_count` buckets using the given allocator
-fn deallocate_migrator<K, V, A>(allocator: &A, migrator_ptr: *mut Migrator<K, V>)
-where
-    A: Allocator,
-{
-    let size = std::mem::size_of::<Migrator<K, V>>();
-    let align = std::mem::align_of::<Migrator<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size, align).unwrap();
-
-    // Again, unwrap the non-null so that if we try to deallocate a null ptr
-    // then this panics.
-    let raw_ptr = migrator_ptr as *mut u8;
-    let ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
-    unsafe {
-        allocator.deallocate(ptr, layout);
-    }
-}
-
-/// Allocates `bucket_count` buckets using the given allocator
-fn allocate_table<K, V, A>(allocator: &A) -> *mut Table<K, V>
-where
-    A: Allocator,
-{
-    let size = std::mem::size_of::<Table<K, V>>();
-    let align = std::mem::align_of::<Table<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size, align).unwrap();
-
-    // Again, unwrap the allocation result, because we should never fail to
-    // allocate.
-    let ptr = allocator.allocate(layout).unwrap().as_ptr() as *mut Table<K, V>;
-    ptr
-}
-
-/// Deallocates `bucket_count` buckets using the given allocator
-fn deallocate_table<K, V, A>(allocator: &A, table_ptr: *mut Table<K, V>)
-where
-    A: Allocator,
-{
-    let size = std::mem::size_of::<Table<K, V>>();
-    let align = std::mem::align_of::<Table<K, V>>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size, align).unwrap();
-
-    // Again, unwrap the non-null so that if we try to deallocate a null ptr
-    // then this panics.
-    let raw_ptr = table_ptr as *mut u8;
-    let ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
-    unsafe {
-        allocator.deallocate(ptr, layout);
-    }
-}
-
-/// Defines the result of an insert into a [LeapfrogMap].
+/// Result types when an insert into a [LeapMap].
 pub(super) enum ConcurrentInsertResult<V> {
     /// The insertion found a cell for the key, replaced the old value with
     /// a new one, and returned the old value.
@@ -173,30 +32,7 @@ pub(super) enum ConcurrentInsertResult<V> {
     Overflow(usize),
 }
 
-/// Table for the map, storing buckets and the mask for the number of cells in
-/// the table.
-struct Table<K, V> {
-    /// Pointer to the buckets for the table.
-    buckets: *mut Bucket<K, V>,
-    /// The mask for indexing into the buckets.
-    size_mask: usize,
-}
-
-impl<K, V> Table<K, V> {
-    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
-    }
-
-    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
-    }
-
-    pub fn size(&self) -> usize {
-        self.size_mask + 1
-    }
-}
-
-/// A concurrent HashMap implementation which uses a modified form of RobinHood/
+/// A concurrent hash map implementation which uses a modified form of RobinHood/
 /// Hopscotch probing. This implementation is lock-free, and therefore it
 /// *not possible* to deadlock.
 ///
@@ -254,10 +90,14 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
         self.get_table(Ordering::Relaxed).size()
     }
 
+    /// Gets a reference to the map's table, using the specified `ordering` to
+    /// load the table reference.
     fn get_table(&self, ordering: Ordering) -> &'a Table<K, V> {
         unsafe { &*self.table.load(ordering) }
     }
 
+    /// Gets a mutable reference to the map's table, using the specified
+    /// `ordering` to load the table reference.
     fn get_table_mut(&self, ordering: Ordering) -> &'a mut Table<K, V> {
         unsafe { &mut *self.table.load(ordering) }
     }
@@ -324,7 +164,7 @@ where
         builder: H,
         allocator: A,
     ) -> LeapMap<K, V, H, A> {
-        let migrator_ptr = allocate_migrator(&allocator);
+        let migrator_ptr = allocate::<Migrator<K, V>, A>(&allocator, 1);
         let migrator = unsafe { &mut *migrator_ptr };
         migrator.initialize();
 
@@ -352,8 +192,8 @@ where
     ///
     /// ```
     /// let map = leapfrog::LeapMap::<u32, u32>::new();
-    /// map.insert(1, 12);
-    /// if let Some(r) = map.get(&1) {
+    /// map.insert(0, 12);
+    /// if let Some(r) = map.get(&0) {
     ///     assert_eq!(r.value(), Some(12));
     /// } else {
     ///     // Map is stale
@@ -438,6 +278,69 @@ where
             println!("Cell value: {:?}", cell.value.load(Ordering::Relaxed));
             self.erase_value(cell)
         })
+    }
+
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map did not have this key present, None is returned.
+    ///
+    /// If the map did have this key present, the value is updated and the old
+    /// value is returned.
+    pub fn insert(&self, key: K, mut value: V) -> Option<V> {
+        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+
+        loop {
+            // We need to get the pointer to the buckets which we are going to
+            // attempt to insert into. The ideal ordering here would be Consume,
+            // but we don't have that, so we use Acquire instead. For most platforms
+            // the impact should be negligible, however, that mught not be the case
+            // for ARM, so we should check this for those platforms.
+            let table = self.get_table_mut(Ordering::Acquire);
+            let size_mask = table.size_mask;
+            let buckets = table.bucket_slice_mut();
+
+            match Self::insert_or_find(hash, value, buckets, size_mask) {
+                ConcurrentInsertResult::Overflow(overflow_index) => {
+                    // Try and create the table migration. Only a single thread
+                    // should do this. Any threads which don't get the flag should
+                    // start cleaning up old tables which have not been deallocated.
+                    let mut migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
+                    if migrator.set_initialization_begin_flag() {
+                        Self::initialize_migrator(
+                            &self.allocator,
+                            &mut migrator,
+                            &self.table,
+                            overflow_index,
+                        );
+                        migrator.set_initialization_complete_flag();
+                    } else {
+                        // Clean up old migration tables ...
+
+                        // Wait for migrator to be created ...
+                        //while !migrator.initialization_complete() {
+                        //    std::hint::spin_loop();
+                        // }
+                    }
+
+                    // Migration is created, all threads can see that try and migrate.
+                    if migrator.initialization_complete() {
+                        Self::perform_migration(&self.allocator, migrator, &self.table);
+                    }
+                }
+                ConcurrentInsertResult::Replaced(old_value) => {
+                    return Some(old_value);
+                }
+                ConcurrentInsertResult::NewInsert => {
+                    return None;
+                }
+                ConcurrentInsertResult::Migration(retry_value) => {
+                    // Another thread overflowed and started a migration.
+                    value = retry_value;
+                    assert!(value == retry_value);
+                    self.participate_in_migration();
+                }
+            }
+        }
     }
 
     /// Erases the cell from the map, returning the old value if the cell was
@@ -562,69 +465,6 @@ where
         }
 
         None
-    }
-
-    /// Inserts a key-value pair into the map.
-    ///
-    /// If the map did not have this key present, None is returned.
-    ///
-    /// If the map did have this key present, the value is updated and the old
-    /// value is returned.
-    pub fn insert(&self, key: K, mut value: V) -> Option<V> {
-        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
-
-        loop {
-            // We need to get the pointer to the buckets which we are going to
-            // attempt to insert into. The ideal ordering here would be Consume,
-            // but we don't have that, so we use Acquire instead. For most platforms
-            // the impact should be negligible, however, that mught not be the case
-            // for ARM, so we should check this for those platforms.
-            let table = self.get_table_mut(Ordering::Acquire);
-            let size_mask = table.size_mask;
-            let buckets = table.bucket_slice_mut();
-
-            match Self::insert_or_find(hash, value, buckets, size_mask) {
-                ConcurrentInsertResult::Overflow(overflow_index) => {
-                    // Try and create the table migration. Only a single thread
-                    // should do this. Any threads which don't get the flag should
-                    // start cleaning up old tables which have not been deallocated.
-                    let mut migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
-                    if migrator.set_initialization_begin_flag() {
-                        Self::initialize_migrator(
-                            &self.allocator,
-                            &mut migrator,
-                            &self.table,
-                            overflow_index,
-                        );
-                        migrator.set_initialization_complete_flag();
-                    } else {
-                        // Clean up old migration tables ...
-
-                        // Wait for migrator to be created ...
-                        //while !migrator.initialization_complete() {
-                        //    std::hint::spin_loop();
-                        // }
-                    }
-
-                    // Migration is created, all threads can see that try and migrate.
-                    if migrator.initialization_complete() {
-                        Self::perform_migration(&self.allocator, migrator, &self.table);
-                    }
-                }
-                ConcurrentInsertResult::Replaced(old_value) => {
-                    return Some(old_value);
-                }
-                ConcurrentInsertResult::NewInsert => {
-                    return None;
-                }
-                ConcurrentInsertResult::Migration(retry_value) => {
-                    // Another thread overflowed and started a migration.
-                    value = retry_value;
-                    assert!(value == retry_value);
-                    self.participate_in_migration();
-                }
-            }
-        }
     }
 
     /// Creates the `migrator`, which is used to migrate from the old `buckets`. Only
@@ -1106,7 +946,7 @@ where
     fn allocate_and_init_table(allocator: &A, cells: usize) -> *mut Table<K, V> {
         assert!(cells >= 4 && (cells % 2 == 0));
         let bucket_count = cells >> 2;
-        let bucket_ptr = allocate_buckets(&allocator, bucket_count);
+        let bucket_ptr = allocate::<Bucket<K, V>, A>(&allocator, bucket_count);
         let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
@@ -1129,7 +969,7 @@ where
             }
         }
 
-        let table_ptr = allocate_table(&allocator);
+        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1);
         let table = unsafe { &mut *table_ptr };
 
         table.buckets = bucket_ptr;
@@ -1151,11 +991,26 @@ where
     }
 }
 
-/// Gets a  reference mutable to a cell for the `index` from the `buckets`.
-///
-/// * `buckets`   - The buckets to find the cell in.
-/// * `index`     - The raw index value to convert to a bucket and cell index.
-/// * `size_mask` - A mask for the number of elements in the buckets.
+impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
+    fn drop(&mut self) {
+        let table = self.get_table_mut(Ordering::SeqCst);
+
+        let bucket_ptr = table.buckets;
+        let bucket_count = table.size() >> 2;
+        deallocate::<Bucket<K, V>, A>(&self.allocator, bucket_ptr, bucket_count);
+
+        let table_ptr = self.table.load(Ordering::Relaxed);
+        deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
+
+        // We don't need to deallocate the buckets for the migrator, since that
+        // has already been handled.
+        let migrator_ptr = self.migrator.load(Ordering::SeqCst);
+        deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
+    }
+}
+
+/// Gets a reference to a cell using the `index` to find the cell in the
+/// `buckets` slice.
 #[inline]
 fn get_cell<K, V: Value>(
     buckets: &[Bucket<K, V>],
@@ -1164,43 +1019,12 @@ fn get_cell<K, V: Value>(
 ) -> &AtomicCell<V> {
     let bucket_index = get_bucket_index(index, size_mask);
     let cell_index = get_cell_index(index);
-    if bucket_index >= buckets.len() {
-        println!(
-            "BI {:?} {} {} {}",
-            std::thread::current().id(),
-            bucket_index,
-            buckets.len(),
-            size_mask
-        )
-    }
-    if cell_index >= 7 {
-        println!(
-            "CI {:?} {} {} {}",
-            std::thread::current().id(),
-            bucket_index,
-            buckets.len(),
-            size_mask
-        )
-    }
     &buckets[bucket_index].cells[cell_index]
 }
 
-/// Gets the first delta value for a cell with the given `index`. The first
-/// delta value gives the offset to the start of the probe chain for bucket
-/// assosciated with the `index`.
-///
-/// # Arguments
-///
-/// * `buckets`   - The buckets to find the cell in.
-/// * `index`     - The raw index value to convert to a bucket and cell index.
-/// * `size_mask` - A mask for the number of elements in the buckets.
-#[inline]
-fn get_first_delta<K, V>(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &AtomicU8 {
-    let bucket_index = get_bucket_index(index, size_mask);
-    let cell_index = get_cell_index(index);
-    &buckets[bucket_index].deltas[cell_index]
-}
-
+/// Gets a delta value for the cell assosciated with the `index`  in the bucket
+/// `slice`. If `first` is true, then this will return the first delta value,
+/// while if `first` is false then this will return the second delta value.
 #[inline]
 fn get_delta<K, V>(
     buckets: &[Bucket<K, V>],
@@ -1212,6 +1036,15 @@ fn get_delta<K, V>(
     let bucket_index = get_bucket_index(index, size_mask);
     let cell_index = get_cell_index(index);
     &buckets[bucket_index].deltas[cell_index + offset]
+}
+
+/// Gets the first delta value for the cell assosciated with the `index` into
+/// the bucket slice.
+#[inline]
+fn get_first_delta<K, V>(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &AtomicU8 {
+    let bucket_index = get_bucket_index(index, size_mask);
+    let cell_index = get_cell_index(index);
+    &buckets[bucket_index].deltas[cell_index]
 }
 
 /// Gets the first delta value for a cell with the given `index`. The first
@@ -1230,45 +1063,105 @@ fn get_second_delta<K, V>(buckets: &[Bucket<K, V>], index: usize, size_mask: usi
     &buckets[bucket_index].deltas[cell_index + 4]
 }
 
-/// Gets the index of the bucket for the `index`.
-///
-/// # Arguments
-///
-/// * `index`     - The raw index to get the index of the bucket for.
-/// * `size_mask` - A mask for the total number of cells in the map.
+/// Gets the index of the bucket for a raw `index` value, which `size_mask` is
+/// a mask for the number of cell which can be stored in the buckets.
 #[inline]
 const fn get_bucket_index(index: usize, size_mask: usize) -> usize {
     (index & size_mask) >> 2
 }
 
-/// Gets the index of the cell within a bucket for the `index`.
-///
-/// # Arguments
-///
-/// * `index`     - The raw index to get the index of the cell for.
-/// * `size_mask` - A mask for the total number of cells in the map.
+/// Gets the index of the cell within a bucket for the `index` which would be
+/// used to get the bucket from a bucket slice.
 #[inline]
 const fn get_cell_index(index: usize) -> usize {
     index & 3
 }
 
-impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
-    fn drop(&mut self) {
-        let table = self.get_table_mut(Ordering::SeqCst);
+/// Underlying table for a [LeapMap]. This stores a pointer to the buckets and
+/// the mask for the number of cells which are stored in the table.
+struct Table<K, V> {
+    /// Pointer to the buckets for the table.
+    buckets: *mut Bucket<K, V>,
+    /// The mask for indexing into the buckets.
+    size_mask: usize,
+}
 
-        let bucket_ptr = table.buckets;
-        let bucket_count = table.size() >> 2;
-        deallocate_buckets(&self.allocator, bucket_ptr, bucket_count);
+impl<K, V> Table<K, V> {
+    /// Gets a mutable slice of the table buckets.
+    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+    }
 
-        let table_ptr = self.table.load(Ordering::Relaxed);
-        deallocate_table(&self.allocator, table_ptr);
+    /// Gets a slice of the table buckets.
+    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+    }
 
-        // We don't need to deallocate the buckets for the migrator, since that
-        // has already been handled.
-        let migrator_ptr = self.migrator.load(Ordering::SeqCst);
-        deallocate_migrator(&self.allocator, migrator_ptr);
+    /// Returns the number of cells in the table.
+    pub fn size(&self) -> usize {
+        self.size_mask + 1
     }
 }
+
+/// Struct which stores a cell in a concurrent hash map. A cell is simply a
+/// hash (rather than the key iteself) and the value associated with the key
+/// for which the hash is associated.
+///
+/// Here we need the value to be atomic. Since V is generic, it's possible that
+/// there is no built-in atomic support for it, in which case the `Atomic`
+/// type will fall back to using an efficient spinlock implementation.
+pub(super) struct AtomicCell<V> {
+    /// The hashed value of the cell.
+    hash: AtomicHashedKey,
+    /// The value assosciated with the hash.
+    value: Atomic<V>,
+}
+
+/// Struct which stores buckets of cells. Each bucket stores four cells
+/// and two delta values per cell. The first delta value for a cell provides
+/// the offset to the cell which is the start of the probe chain for the cell.
+/// The second delta value provides the offset to the next link in the probe
+/// chain once a search along the probe chain has started (via the first offset
+/// value).
+pub(super) struct Bucket<K, V> {
+    /// Delta values for the cells, see the above documentation for what each
+    /// delta value means.
+    deltas: [AtomicU8; 8],
+    /// Cells for the bucket.
+    cells: [AtomicCell<V>; 4],
+    /// Placeholder for the key.
+    _key: std::marker::PhantomData<K>,
+}
+
+/*
+/// Allocates `count` number of elements of type T, using the `allocator`.
+fn allocate<T, A: Allocator>(allocator: &A, count: usize) -> *mut T {
+    let size = std::mem::size_of::<T>();
+    let align = std::mem::align_of::<T>();
+
+    // We unwrap here because we want to panic if we fail to get a valid layout
+    let layout = Layout::from_size_align(size * count, align).unwrap();
+
+    // Again, unwrap the allocation result. It should never fail to allocate.
+    allocator.allocate(layout).unwrap().as_ptr() as *mut T
+}
+
+/// Deallocates `count` number of elements of type T, using the `allocator`.
+fn deallocate<T, A: Allocator>(allocator: &A, ptr: *mut T, count: usize) {
+    let size = std::mem::size_of::<T>();
+    let align = std::mem::align_of::<T>();
+
+    // We unwrap here because we want to panic if we fail to get a valid layout
+    let layout = Layout::from_size_align(size * count, align).unwrap();
+
+    // Again, unwrap the allocation result. It should never fail to allocate.
+    let raw_ptr = ptr as *mut u8;
+    let nonnull_ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
+    unsafe {
+        allocator.deallocate(nonnull_ptr, layout);
+    }
+}
+*/
 
 /// A struct for a migration source, which stores a pointer to the source buckets
 /// to migrate from, and the index in the source table.
@@ -1287,7 +1180,8 @@ impl<K, V> MigrationSource<K, V> {
     }
 }
 
-/// A struct which migrates tables for a [LeapMap].
+/// A struct which migrates stale tables for a [LeapMap] into a non-stale destination
+/// table.
 struct Migrator<K, V> {
     /// Destination table for migrator.
     dst_table: AtomicPtr<Table<K, V>>,
@@ -1536,7 +1430,6 @@ mod tests {
             if key != u64::default() && key != u64::MAX {
                 match map.insert(key, key) {
                     Some(old) => {
-                        println!("Replaced {} {}", key, old);
                         // This can only happen if we have generated a key which
                         // hashes to the same value:
                         assert!(key == old);
@@ -1579,8 +1472,7 @@ mod tests {
                     }
                     None => {
                         // Didn't find the key, which should not happen!
-                        println!("Failed to find: {} {}", map.hash_usize(&key), key);
-                        //assert!(key == 0);
+                        assert!(key == 0);
                     }
                 }
             }
