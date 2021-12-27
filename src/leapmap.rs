@@ -282,10 +282,18 @@ where
 
     /// Inserts a key-value pair into the map.
     ///
-    /// If the map did not have this key present, None is returned.
+    /// If the map did not have this key present, `None` is returned.
     ///
     /// If the map did have this key present, the value is updated and the old
     /// value is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = leapfrog::LeapMap::<u32, u32>::new();
+    /// assert_eq!(map.insert(37, 12), None);
+    /// assert_eq!(map.insert(37, 14), Some(12));
+    /// ```
     pub fn insert(&self, key: K, mut value: V) -> Option<V> {
         let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
 
