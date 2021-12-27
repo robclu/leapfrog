@@ -103,24 +103,36 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
     }
 }
 
+impl<K, V> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+{
+    /// Creates the hash map with space for the default number of elements, which
+    /// will use the global allocator for allocation of the map data.
+    pub fn new() -> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+        Self::new_in(Global)
+    }
+
+    /// Creates the hash map with space for `capacity` elements, which will use
+    /// the global allocator for allocation of the map data.
+    pub fn with_capacity(
+        capacity: usize,
+    ) -> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+        Self::with_capacity_and_hasher_in(
+            capacity,
+            BuildHasherDefault::<MurmurHasher>::default(),
+            Global,
+        )
+    }
+}
+
 impl<K, V, H> LeapMap<K, V, H, Global>
 where
     K: Eq + Hash + Clone,
     V: Value,
     H: BuildHasher + Default,
 {
-    /// Creates the hash map with space for the default number of elements, which
-    /// will use the global allocator for allocation of the map data.
-    pub fn new() -> LeapMap<K, V, H, Global> {
-        Self::new_in(Global)
-    }
-
-    /// Creates the hash map with space for `capacity` elements, which will use
-    /// the global allocator for allocation of the map data.
-    pub fn with_capacity(capacity: usize) -> LeapMap<K, V, H, Global> {
-        Self::with_capacity_and_hasher_in(capacity, H::default(), Global)
-    }
-
     /// Creates the hash map with space for `capacity` elements, using the
     /// `builder` to create the hasher, which will use the global allocator for
     /// allocation of the map data.
@@ -191,7 +203,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let map = leapfrog::LeapMap::<u32, u32>::new();
+    /// let map = leapfrog::LeapMap::new();
     /// map.insert(0, 12);
     /// if let Some(r) = map.get(&0) {
     ///     assert_eq!(r.value(), Some(12));
@@ -216,7 +228,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let map = leapfrog::LeapMap::<u32, u32>::new();
+    /// let map = leapfrog::LeapMap::new();
     /// map.insert(1, 12);
     /// if let Some(x) = map.get_mut(&1) {
     ///     if let Some(old) = x.set_value(14) {
@@ -243,7 +255,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let map = leapfrog::LeapMap::<u32, u64>::new();
+    /// let map = leapfrog::LeapMap::new();
     /// map.insert(1, 47u64);
     /// assert_eq!(map.contains_key(&1), true);
     /// assert_eq!(map.contains_key(&2), false);
@@ -263,7 +275,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let map = leapfrog::LeapMap::<u32, u32>::new();
+    /// let map = leapfrog::LeapMap::new();
     /// map.insert(2, 17);
     /// assert_eq!(map.remove(&2), Some(17));
     /// assert_eq!(map.remove(&2), None);
@@ -290,7 +302,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let map = leapfrog::LeapMap::<u32, u32>::new();
+    /// let map = leapfrog::LeapMap::new();
     /// assert_eq!(map.insert(37, 12), None);
     /// assert_eq!(map.insert(37, 14), Some(12));
     /// ```

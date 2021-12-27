@@ -33,17 +33,24 @@ pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
     fn redirect() -> Self;
 }
 
-impl Value for u32 {
-    fn redirect() -> u32 {
-        u32::MAX
-    }
+macro_rules! value_impl {
+    ($type:ty, $redirect_expr:expr) => {
+        impl Value for $type {
+            fn redirect() -> $type {
+                $redirect_expr
+            }
+        }
+    };
 }
 
-impl Value for u64 {
-    fn redirect() -> u64 {
-        u64::MAX
-    }
-}
+value_impl!(u8, u8::MAX);
+value_impl!(u16, u16::MAX);
+value_impl!(u32, u32::MAX);
+value_impl!(u64, u64::MAX);
+value_impl!(i8, i8::MAX);
+value_impl!(i16, i16::MAX);
+value_impl!(i32, i32::MAX);
+value_impl!(i64, i64::MAX);
 
 /// Creates a hash value from the `hash_builder` and `value`.
 ///
