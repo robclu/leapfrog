@@ -271,7 +271,6 @@ where
     /// Removes the key from the map, returning the value at the key if the key
     /// was present in the map.
     ///
-    ///
     /// # Examples
     ///
     /// ```
@@ -286,10 +285,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash).map_or(None, |cell| {
-            println!("Cell value: {:?}", cell.value.load(Ordering::Relaxed));
-            self.erase_value(cell)
-        })
+        self.find(hash).map_or(None, |cell| self.erase_value(cell))
     }
 
     /// Inserts a key-value pair into the map.
@@ -363,6 +359,26 @@ where
         }
     }
 
+    /// Returns the length of the map. This needs to be fixed to not be computed
+    /// every time. This is currently a very crude estimate of the length of the
+    /// map.
+    pub fn len(&self) -> usize {
+        let mut elements: usize = 0;
+        let table = self.get_table_mut(Ordering::Acquire);
+        let buckets = table.bucket_slice();
+
+        for bucket in buckets {
+            for cell in &bucket.cells {
+                if cell.hash.load(Ordering::Relaxed) == Self::null_hash() {
+                    continue;
+                }
+
+                elements += 1;
+            }
+        }
+        elements
+    }
+
     /// Erases the cell from the map, returning the old value if the cell was
     /// in the map and has a valid value. This returns `None` if the cell has
     /// already been erased, or if the map was migrated and this cell was not
@@ -431,10 +447,14 @@ where
         loop {
             let table = self.get_table_mut(Ordering::Acquire);
             let size_mask = table.size_mask;
-            let buckets = table.bucket_slice_mut();
+            let buckets = table.bucket_slice();
 
             if let Some(cell) = self.find_inner(hash, buckets, size_mask) {
-                if cell.value.load(Ordering::Acquire) != V::redirect() {
+                let value = cell.value.load(Ordering::Acquire);
+                if value != V::redirect() {
+                    if value == V::default() {
+                        return None;
+                    }
                     return Some(cell);
                 }
 
@@ -457,7 +477,7 @@ where
         buckets: &'a [Bucket<K, V>],
         size_mask: usize,
     ) -> Option<&'a AtomicCell<V>> {
-        let mut index = hash as usize; // & size_mask;
+        let mut index = hash as usize & size_mask;
         let cell = get_cell(buckets, index, size_mask);
         let probe_hash = cell.hash.load(Ordering::Relaxed);
         if hash == probe_hash {
@@ -469,8 +489,7 @@ where
         // Otherwise we have to follow the probe chain:
         let mut delta = get_first_delta(buckets, index, size_mask).load(Ordering::Relaxed);
         while delta != 0 {
-            //index = (index + delta as usize) & size_mask;
-            index = index + delta as usize;
+            index = (index + delta as usize) & size_mask;
             let cell = get_cell(buckets, index, size_mask);
             let probe_hash = cell.hash.load(Ordering::Relaxed);
 

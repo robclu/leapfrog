@@ -51,6 +51,7 @@ value_impl!(i8, i8::MAX);
 value_impl!(i16, i16::MAX);
 value_impl!(i32, i32::MAX);
 value_impl!(i64, i64::MAX);
+value_impl!(usize, usize::MAX);
 
 /// Creates a hash value from the `hash_builder` and `value`.
 ///
