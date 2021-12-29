@@ -8,6 +8,7 @@ use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
+use std::sync::Arc;
 
 /// The type used for hashed keys.
 type HashedKey = u64;
@@ -378,7 +379,8 @@ where
                         );
                         migrator.set_initialization_complete_flag();
                     } else {
-                        // Clean up old migration tables ...
+                        // Try and clean up any old migration tables.
+                        migrator.cleanup_stale_table(&self.allocator);
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -432,68 +434,6 @@ where
             }
         }
         elements
-    }
-
-    /// Erases the cell from the map, returning the old value if the cell was
-    /// in the map and has a valid value. This returns `None` if the cell has
-    /// already been erased, or if the map was migrated and this cell was not
-    /// migrated and therefore erased.
-    ///
-    /// This does not actually remove the cell from the map, delete the cell hash
-    /// value, or modify any deltas for the probe chain, since that would break
-    /// lookups of other cells in the map. This also means that if another cell
-    /// is inserted with the same hash then there is a faster path when inserting.
-    fn erase_value(&self, mut cell: &'a AtomicCell<V>) -> Option<V> {
-        loop {
-            let value = cell.value.load(Ordering::Relaxed);
-
-            // If the cell was found, but the value is default, then it means
-            // that this cell has already been erased, since the value
-            // would have been set to default.
-            if value == V::null() {
-                return None;
-            }
-
-            match cell.value.compare_exchange(
-                value,
-                V::null(),
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return Some(value);
-                }
-                Err(updated) => {
-                    // Another thread wrote to the cell before we exchanged, we
-                    // can treat this as if we erased the cell and then the new
-                    // thread performed the write, which is what happened, we just
-                    // didn't finish the erasure.
-                    if updated != V::redirect() {
-                        return Some(value);
-                    }
-
-                    // There is a migration, so we can't erase. Help finish the
-                    // migration:
-                    let hash = cell.hash.load(Ordering::Relaxed);
-                    loop {
-                        self.participate_in_migration();
-                        match self.find(hash) {
-                            Some(new_cell) => {
-                                cell = new_cell;
-                                // This should almost always be true, migration is finished.
-                                // Break and then search again with the new cell.
-                                if cell.value.load(Ordering::Relaxed) != V::redirect() {
-                                    break;
-                                }
-                                // Migration not finished, try again ..
-                            }
-                            // Not found in new map, so it's effectively erased
-                            None => return None,
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Tries to find the value for the `hash`, without inserting into the map.
@@ -563,6 +503,68 @@ where
         None
     }
 
+    /// Erases the cell from the map, returning the old value if the cell was
+    /// in the map and has a valid value. This returns `None` if the cell has
+    /// already been erased, or if the map was migrated and this cell was not
+    /// migrated and therefore erased.
+    ///
+    /// This does not actually remove the cell from the map, delete the cell hash
+    /// value, or modify any deltas for the probe chain, since that would break
+    /// lookups of other cells in the map. This also means that if another cell
+    /// is inserted with the same hash then there is a faster path when inserting.
+    fn erase_value(&self, mut cell: &'a AtomicCell<V>) -> Option<V> {
+        loop {
+            let value = cell.value.load(Ordering::Relaxed);
+
+            // If the cell was found, but the value is default, then it means
+            // that this cell has already been erased, since the value
+            // would have been set to default.
+            if value == V::null() {
+                return None;
+            }
+
+            match cell.value.compare_exchange(
+                value,
+                V::null(),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(value);
+                }
+                Err(updated) => {
+                    // Another thread wrote to the cell before we exchanged, we
+                    // can treat this as if we erased the cell and then the new
+                    // thread performed the write, which is what happened, we just
+                    // didn't finish the erasure.
+                    if updated != V::redirect() {
+                        return Some(value);
+                    }
+
+                    // There is a migration, so we can't erase. Help finish the
+                    // migration:
+                    let hash = cell.hash.load(Ordering::Relaxed);
+                    loop {
+                        self.participate_in_migration();
+                        match self.find(hash) {
+                            Some(new_cell) => {
+                                cell = new_cell;
+                                // This should almost always be true, migration is finished.
+                                // Break and then search again with the new cell.
+                                if cell.value.load(Ordering::Relaxed) != V::redirect() {
+                                    break;
+                                }
+                                // Migration not finished, try again ..
+                            }
+                            // Not found in new map, so it's effectively erased
+                            None => return None,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Creates the `migrator`, which is used to migrate from the old `buckets`. Only
     /// a single thread must do this, so `acquire_migration_flag` should be called
     /// prior to calling this, and then this must only be called by the thread which
@@ -595,7 +597,8 @@ where
         let estimated = round_to_pow2((in_use_estimated * 2.0).max(1.0) as usize);
 
         // FIXME: This doesn't allow the map to shrink
-        let new_table_size = estimated.max((size_mask + 1) as usize);
+        //let new_table_size = estimated.max((size_mask + 1) as usize);
+        let new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
 
         // Migrator initialization:
         let dst_table_ptr = Self::allocate_and_init_table(&allocator, new_table_size);
@@ -639,15 +642,15 @@ where
         // migration tables.
         if migrator.finishing() {
             while migrator.finishing() {
-                //...
+                // Clean up old tables, then return:
+                migrator.cleanup_stale_table(&self.allocator);
             }
-            // Clean up old tables, then return ...
             return;
         }
 
         if migrator.in_process() && !migrator.initialization_complete() {
-            while migrator.initialization_complete() {
-                //...
+            while !migrator.initialization_complete() {
+                migrator.cleanup_stale_table(&self.allocator);
             }
         }
 
@@ -739,7 +742,7 @@ where
             // Clean up old migrated tables until finished. This also makes the
             // performance of inserts more stable.
             while migrator.status.load(Ordering::Relaxed) >= 1 {
-                std::hint::spin_loop();
+                migrator.cleanup_stale_table(allocator);
             }
 
             // We weren't the last thread here, so we can exit.
@@ -754,7 +757,7 @@ where
         if migrator.overflowed.load(Ordering::Relaxed) {
             // Overflow of destination table, move the destination table to be
             // a source in the migrator, create a new destination table, and
-            // then break so that we can try again:
+            // then break so that we can try again.
             let table_ptr = migrator.dst_table.load(Ordering::Relaxed);
             let table = unsafe { &*table_ptr };
 
@@ -794,11 +797,17 @@ where
                 .store(std::ptr::null_mut(), Ordering::Relaxed);
 
             // FIXME: Move the source buckets into the cleanup queue:
+            let last_source = migrator.num_stale_sources.load(Ordering::Relaxed);
+            migrator
+                .num_stale_sources
+                .fetch_add(num_sources, Ordering::Relaxed);
             for i in 0..num_sources {
-                (&migrator.sources[i as usize])
-                    .index
-                    .store(0, Ordering::Relaxed);
-                // ...
+                let source = migrator.sources.pop().unwrap();
+                let index = migrator.stale_source_index((last_source + i) as usize);
+
+                migrator.stale_sources[index]
+                    .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
+                migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
             }
 
             // Finally we can set that we are done!
@@ -1102,6 +1111,12 @@ impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
         let table_ptr = self.table.load(Ordering::Relaxed);
         deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
 
+        let migrator_ptr = self.migrator.load(Ordering::SeqCst);
+        let migrator = unsafe { &*migrator_ptr };
+        while migrator.stale_tables_remaining() > 0 {
+            migrator.cleanup_stale_table(&self.allocator);
+        }
+
         // We don't need to deallocate the buckets for the migrator, since that
         // has already been handled.
         let migrator_ptr = self.migrator.load(Ordering::SeqCst);
@@ -1265,9 +1280,13 @@ struct Migrator<K, V> {
     overflowed: AtomicBool,
     /// The number of source tables to migrate:
     num_source_tables: AtomicU32,
+    stale_sources: Vec<AtomicPtr<Table<K, V>>>,
+    num_stale_sources: AtomicU32,
+    last_stale_source: AtomicU32,
+    current_stale_source: AtomicU32,
 }
 
-impl<K, V: Value> Migrator<K, V> {
+impl<K, V> Migrator<K, V> {
     /// Mask for resetting the status.
     pub(super) const RESET_FLAG: usize = 0x00;
     /// Mask for migration complete flag:
@@ -1286,15 +1305,29 @@ impl<K, V: Value> Migrator<K, V> {
     /// bit 2 : initialization finished.
     pub(super) const STATUS_MASK: usize = Self::MIGRATION_COMPLETE_FLAG | Self::INITIALIZATION_MASK;
 
+    /// Number of stale source elements
+    const STALE_SOURCES: usize = 16;
+    /// Mask for stale source index.
+    const STALE_CAPACITY_MASK: usize = Self::STALE_SOURCES - 1;
+
     /// Initializes the migrator.
     pub fn initialize(&mut self) {
+        let mut stale_sources = vec![];
+        for _ in 0..Self::STALE_SOURCES {
+            stale_sources.push(AtomicPtr::<Table<K, V>>::new(std::ptr::null_mut()));
+        }
+
         self.dst_table
             .store(std::ptr::null_mut(), Ordering::Relaxed);
         self.sources = vec![];
+        self.stale_sources = stale_sources;
         self.status.store(Self::RESET_FLAG, Ordering::Relaxed);
         self.remaining_units.store(0, Ordering::Relaxed);
         self.overflowed.store(false, Ordering::Relaxed);
         self.num_source_tables.store(0, Ordering::Relaxed);
+        self.num_stale_sources.store(0, Ordering::Relaxed);
+        self.last_stale_source.store(0, Ordering::Relaxed);
+        self.current_stale_source.store(0, Ordering::Relaxed);
     }
 
     /// Set the flag which indicates that the migrator is being initialized. This
@@ -1344,6 +1377,48 @@ impl<K, V: Value> Migrator<K, V> {
             == Self::INITIALIZATION_START_FLAG
     }
 
+    /// Gets the index into the stale source buffer for the specified `index`.
+    pub fn stale_source_index(&self, index: usize) -> usize {
+        index & Self::STALE_CAPACITY_MASK
+    }
+
+    /// Returns the number of stale source tables to clean up.
+    pub fn stale_tables_remaining(&self) -> u32 {
+        self.last_stale_source.load(Ordering::Relaxed)
+            - self.current_stale_source.load(Ordering::Relaxed)
+    }
+
+    /// Tries to clean up (deallocate) any stale source tables.
+    pub fn cleanup_stale_table<A: Allocator>(&self, allocator: &A) {
+        let current = self.current_stale_source.load(Ordering::Relaxed);
+        let last_visible = self.last_stale_source.load(Ordering::Relaxed);
+
+        // Check if there are any old source tables to clean up
+        if current >= last_visible {
+            return;
+        }
+
+        // There are sources to clean up, try and get one:
+        if self
+            .current_stale_source
+            .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            // Won the race, we can deallocate the stale source for our index:
+            let index = self.stale_source_index(current as usize);
+            let table_ptr = self.stale_sources[index].load(Ordering::Relaxed);
+            let table = unsafe { &mut *table_ptr };
+
+            let bucket_ptr = table.buckets;
+            let bucket_count = table.size() >> 2;
+            deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
+            deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
+            self.stale_sources[index].store(std::ptr::null_mut(), Ordering::Relaxed);
+        }
+
+        // Lost the race, just return.
+    }
+
     /// Performs the migration of a range of the buckets between `start_index`
     /// and `end_index` for the source with index `src_index. This returns true
     /// if the migration completed successfully.
@@ -1357,6 +1432,7 @@ impl<K, V: Value> Migrator<K, V> {
         K: Hash + Eq + Clone,
         H: BuildHasher + Default,
         A: Allocator,
+        V: Value,
     {
         let source = &self.sources[src_index];
         let src_table = unsafe { &*source.table.load(Ordering::Relaxed) };

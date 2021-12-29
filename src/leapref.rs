@@ -198,7 +198,7 @@ where
                 {
                     return Some(current);
                 }
-                // Lost a race to update the cell, go and try again
+                // Lost the race to update the cell, go and try again
             }
         }
     }
