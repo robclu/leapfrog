@@ -31,27 +31,31 @@ pub use leapmap::LeapMap;
 pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
     /// Returns the value used for redirection.
     fn redirect() -> Self;
+    fn null() -> Self;
 }
 
 macro_rules! value_impl {
-    ($type:ty, $redirect_expr:expr) => {
+    ($type:ty, $redirect_expr:expr, $null_expr:expr) => {
         impl Value for $type {
             fn redirect() -> $type {
                 $redirect_expr
+            }
+            fn null() -> $type {
+                $null_expr
             }
         }
     };
 }
 
-value_impl!(u8, u8::MAX);
-value_impl!(u16, u16::MAX);
-value_impl!(u32, u32::MAX);
-value_impl!(u64, u64::MAX);
-value_impl!(i8, i8::MAX);
-value_impl!(i16, i16::MAX);
-value_impl!(i32, i32::MAX);
-value_impl!(i64, i64::MAX);
-value_impl!(usize, usize::MAX);
+value_impl!(u8, u8::MAX, u8::MAX - 1);
+value_impl!(u16, u16::MAX, u16::MAX - 1);
+value_impl!(u32, u32::MAX, u32::MAX - 1);
+value_impl!(u64, u64::MAX, u64::MAX - 1);
+value_impl!(i8, i8::MAX, i8::MAX - 1);
+value_impl!(i16, i16::MAX, i16::MAX - 1);
+value_impl!(i32, i32::MAX, i32::MAX - 1);
+value_impl!(i64, i64::MAX, i64::MAX - 1);
+value_impl!(usize, usize::MAX, usize::MAX - 1);
 
 /// Creates a hash value from the `hash_builder` and `value`.
 ///

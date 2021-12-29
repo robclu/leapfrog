@@ -69,7 +69,9 @@ fn remove_keys(
         let key = key ^ (key >> 16);
         if key != u64::default() && key != <u64 as Value>::redirect() {
             match map.get(&key) {
-                Some(value_ref) => {
+                Some(mut value_ref) => {
+                    checksum = checksum.wrapping_add(value_ref.value());
+                    /*
                     match value_ref.value() {
                         Some(v) => {
                             checksum = checksum.wrapping_add(v);
@@ -80,6 +82,7 @@ fn remove_keys(
                             assert!(key == 0);
                         }
                     }
+                    */
                 }
                 None => {
                     // Didn't find the key, which should not happen!

@@ -9,7 +9,7 @@ use std::thread;
 /// Number of keys and values to work with.
 const NUM_KEYS: usize = 1 << 12;
 /// Number of threads that should be started.
-const NUM_THREADS: usize = 1;
+const NUM_THREADS: usize = 4;
 /// How long the stress test will run (in milliseconds).
 const TEST_LEN: u64 = 5000;
 
@@ -23,6 +23,7 @@ struct Environment {
     vals1: Vec<AtomicU64>,
     vals2: Vec<AtomicU64>,
     ind_dist: Uniform<usize>,
+    third_dist: Uniform<usize>,
     val_dist1: Uniform<Value>,
     val_dist2: Uniform<Value>,
     in_table: Vec<AtomicBool>,
@@ -57,8 +58,9 @@ impl Environment {
             vals1,
             vals2,
             ind_dist: Uniform::from(0..NUM_KEYS - 1),
-            val_dist1: Uniform::from(Value::min_value()..Value::max_value()),
-            val_dist2: Uniform::from(Value::min_value()..Value::max_value()),
+            third_dist: Uniform::from(0..3),
+            val_dist1: Uniform::from(Value::min_value()..Value::max_value() - 2),
+            val_dist2: Uniform::from(Value::min_value()..Value::max_value() - 2),
             in_table,
             in_use,
             finished: AtomicBool::new(false),
@@ -81,41 +83,27 @@ fn stress_insert_thread(env: Arc<Environment>) {
             let key = env.keys[idx];
             let val1 = env.val_dist1.sample(&mut rng);
             let val2 = env.val_dist2.sample(&mut rng);
-            let con1 = env.table1.contains_key(&key);
-            let mut insert = false;
-            let mut def = false;
             let res1 = if !env.table1.contains_key(&key) {
-                insert = true;
-                def = val1 == u64::default();
-                match env.table1.insert(key, val1) {
-                    Some(_) => {
-                        println!("Falsedfsdfasdgdsagsdfgfdsgsdfgsdfg");
-                        false
-                    }
+                env.table1.insert(key, val1).map_or(true, |_| false)
+            } else {
+                false
+            };
+
+            let res2 = if !env.table2.contains_key(&key) {
+                match env.table2.insert(key, val2) {
+                    Some(_) => false,
                     None => true,
                 }
             } else {
                 false
             };
 
-            let res2 = if !env.table2.contains_key(&key) {
-                env.table2.insert(key, val2).map_or(true, |_| false)
-            } else {
-                false
-            };
-
             let in_table = env.in_table[idx].load(Ordering::Relaxed);
-            if res1 == in_table {
-                println!(
-                    "Key {} res: {} in_table: {} contains: {} inserted: {}, def: {}",
-                    key, res1, in_table, con1, insert, def
-                );
-            }
             assert_ne!(res1, in_table);
             assert_ne!(res2, in_table);
             if res1 {
-                //assert_eq!(env.table1.get(&key).unwrap().value().unwrap(), val1);
-                //assert_eq!(env.table2.get(&key).unwrap().value().unwrap(), val2);
+                assert_eq!(env.table1.get(&key).unwrap().value(), val1);
+                assert_eq!(env.table2.get(&key).unwrap().value(), val2);
                 env.vals1[idx].store(val1, Ordering::Relaxed);
                 env.vals2[idx].store(val2, Ordering::Relaxed);
                 env.in_table[idx].store(true, Ordering::Relaxed);
@@ -168,14 +156,54 @@ fn stress_find_thread(env: Arc<Environment>) {
 
             let value = env.table1.get(&key);
             if value.is_some() {
-                assert_eq!(val1, value.unwrap().value().unwrap());
+                assert_eq!(val1, value.unwrap().value());
                 assert!(env.in_table[idx].load(Ordering::Relaxed));
             }
             let value = env.table2.get(&key);
             if value.is_some() {
-                assert_eq!(val2, value.unwrap().value().unwrap());
+                assert_eq!(val2, value.unwrap().value());
                 assert!(env.in_table[idx].load(Ordering::Relaxed));
             }
+            env.num_finds.fetch_add(2, Ordering::Relaxed);
+            env.in_use[idx].swap(false, Ordering::SeqCst);
+        }
+    }
+}
+
+fn stress_update_thread(env: Arc<Environment>) {
+    let mut rng = rand::thread_rng();
+
+    while !env.finished.load(Ordering::SeqCst) {
+        let idx = env.ind_dist.sample(&mut rng);
+        let case = env.third_dist.sample(&mut rng);
+        if env.in_use[idx]
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            let key = env.keys[idx];
+            let val1 = env.val_dist1.sample(&mut rng);
+            let val2 = env.val_dist2.sample(&mut rng);
+            let in_table = env.in_table[idx].load(Ordering::Relaxed);
+
+            // Change this if we add update_fn and/or upsert_fn
+            let res = match case {
+                // Update
+                _ => {
+                    let res1 = env.table1.update(key, val1).map_or(false, |_| true);
+                    let res2 = env.table2.update(key, val2).map_or(false, |_| true);
+                    assert_eq!(res1, in_table);
+                    assert_eq!(res2, in_table);
+                    res1
+                }
+            };
+            if res {
+                assert_eq!(val1, env.table1.get(&key).unwrap().value());
+                assert_eq!(val2, env.table2.get(&key).unwrap().value());
+                env.vals1[idx].store(val1, Ordering::Relaxed);
+                env.vals2[idx].store(val2, Ordering::Relaxed);
+                env.num_updates.fetch_add(2, Ordering::Relaxed);
+            }
+
             env.in_use[idx].swap(false, Ordering::SeqCst);
         }
     }
@@ -191,8 +219,10 @@ fn stress_test() {
         threads.push(thread::spawn(move || stress_insert_thread(env)));
         let env = Arc::clone(&root);
         threads.push(thread::spawn(move || stress_delete_thread(env)));
-        //let env = Arc::clone(&root);
-        //threads.push(thread::spawn(move || stress_find_thread(env)));
+        let env = Arc::clone(&root);
+        threads.push(thread::spawn(move || stress_find_thread(env)));
+        let env = Arc::clone(&root);
+        threads.push(thread::spawn(move || stress_update_thread(env)));
     }
     thread::sleep(std::time::Duration::from_millis(TEST_LEN));
     root.finished.swap(true, Ordering::SeqCst);
@@ -200,11 +230,11 @@ fn stress_test() {
     for t in threads {
         t.join().expect("failed to join thread");
     }
-    let in_table = &*root.in_table; //.lock().unwrap();
+    let in_table = &*root.in_table;
     let num_filled = in_table
         .iter()
         .filter(|b| b.load(Ordering::Relaxed))
         .count();
-    //assert_eq!(num_filled, root.table1.len());
-    //assert_eq!(num_filled, root.table2.len());
+    assert_eq!(num_filled, root.table1.len());
+    assert_eq!(num_filled, root.table2.len());
 }

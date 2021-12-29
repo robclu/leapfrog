@@ -183,7 +183,7 @@ where
         let table_ptr = Self::allocate_and_init_table(&allocator, capacity);
         LeapMap {
             table: AtomicPtr::new(table_ptr),
-            hash_builder: builder, //H::default(),
+            hash_builder: builder,
             allocator,
             migrator: AtomicPtr::new(migrator_ptr),
         }
@@ -205,22 +205,22 @@ where
     /// ```
     /// let map = leapfrog::LeapMap::new();
     /// map.insert(0, 12);
-    /// if let Some(r) = map.get(&0) {
-    ///     assert_eq!(r.value(), Some(12));
+    /// if let Some(mut r) = map.get(&0) {
+    ///     assert_eq!(r.value(), 12);
     /// } else {
     ///     // Map is stale
     ///     assert!(false);
     /// }
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Ref<'a, V>>
+    pub fn get<Q: ?Sized>(&'a self, key: &Q) -> Option<Ref<'a, K, V, H, A>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
         self.find(hash)
-            .map_or(None, |cell| Some(Ref::new(&cell.value)))
+            .map_or(None, |cell| Some(Ref::new(self, cell, hash)))
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -230,24 +230,24 @@ where
     /// ```
     /// let map = leapfrog::LeapMap::new();
     /// map.insert(1, 12);
-    /// if let Some(x) = map.get_mut(&1) {
-    ///     if let Some(old) = x.set_value(14) {
+    /// if let Some(mut value_ref) = map.get_mut(&1) {
+    ///     if let Some(old) = value_ref.set_value(14) {
     ///         assert_eq!(old, 12);
     ///     } else {
     ///        // Map is being moved, can't update
     ///     }
     /// }
-    /// assert_eq!(map.get(&1).unwrap().value(), Some(14));
+    /// assert_eq!(map.get(&1).unwrap().value(), 14);
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get_mut<Q: ?Sized>(&self, key: &Q) -> Option<RefMut<'a, V>>
+    pub fn get_mut<Q: ?Sized>(&'a self, key: &Q) -> Option<RefMut<'a, K, V, H, A>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
         self.find(hash)
-            .map_or(None, |cell| Some(RefMut::new(&cell.value)))
+            .map_or(None, |cell| Some(RefMut::new(self, cell, hash)))
     }
 
     /// Returns true if the map contains the specified `key`.
@@ -288,6 +288,53 @@ where
         self.find(hash).map_or(None, |cell| self.erase_value(cell))
     }
 
+    /// Updates a key-value pair.
+    ///
+    /// If the map did not have this key present, `None` is returned.
+    ///
+    /// If the map did have this key present, the value is updated and the old
+    /// value is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = leapfrog::LeapMap::new();
+    /// assert_eq!(map.insert(37, 12), None);
+    /// assert_eq!(map.update(37, 14), Some(12));
+    /// ```
+    pub fn update(&self, key: K, value: V) -> Option<V> {
+        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+        debug_assert!(value != V::null());
+
+        loop {
+            match self.find(hash) {
+                Some(cell) => {
+                    let old = cell.value.load(Ordering::Relaxed);
+                    match Self::exchange_value(cell, value, old) {
+                        // A racing thread deleted the cell just before we performed the update
+                        ConcurrentInsertResult::NewInsert => {
+                            return Some(V::null());
+                        }
+                        ConcurrentInsertResult::Replaced(old_value) => {
+                            return Some(old_value);
+                        }
+                        ConcurrentInsertResult::Overflow(_) => {
+                            // This should never happen, so we panic if it does.
+                            assert!(false);
+                        }
+                        ConcurrentInsertResult::Migration(_) => {
+                            // Help with the migration and then try again
+                            self.participate_in_migration();
+                        }
+                    }
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+    }
+
     /// Inserts a key-value pair into the map.
     ///
     /// If the map did not have this key present, `None` is returned.
@@ -304,6 +351,7 @@ where
     /// ```
     pub fn insert(&self, key: K, mut value: V) -> Option<V> {
         let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+        debug_assert!(value != V::null());
 
         loop {
             // We need to get the pointer to the buckets which we are going to
@@ -331,11 +379,6 @@ where
                         migrator.set_initialization_complete_flag();
                     } else {
                         // Clean up old migration tables ...
-
-                        // Wait for migrator to be created ...
-                        //while !migrator.initialization_complete() {
-                        //    std::hint::spin_loop();
-                        // }
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -352,28 +395,40 @@ where
                 ConcurrentInsertResult::Migration(retry_value) => {
                     // Another thread overflowed and started a migration.
                     value = retry_value;
-                    assert!(value == retry_value);
+                    debug_assert!(value == retry_value);
                     self.participate_in_migration();
                 }
             }
         }
     }
 
-    /// Returns the length of the map. This needs to be fixed to not be computed
-    /// every time. This is currently a very crude estimate of the length of the
-    /// map.
+    /// Returns the length of the map.
+    ///
+    /// This computes the length each time, since the alternative--pdating the
+    /// length on inserts and removals--hurts performance signitifantly under
+    /// contention.
+    ///
+    /// For almost all use cases, gettting the length will be performed very
+    /// infrequently, if at all, so the tradeoff is made here that the more
+    /// likely operations are more performant.
     pub fn len(&self) -> usize {
-        let mut elements: usize = 0;
-        let table = self.get_table_mut(Ordering::Acquire);
+        let table = self.get_table(Ordering::Acquire);
         let buckets = table.bucket_slice();
+        let size = table.size();
 
+        let mut index: usize = 0;
+        let mut elements: usize = 0;
         for bucket in buckets {
             for cell in &bucket.cells {
-                if cell.hash.load(Ordering::Relaxed) == Self::null_hash() {
-                    continue;
+                if index >= size {
+                    break;
                 }
 
-                elements += 1;
+                if cell.value.load(Ordering::Relaxed) != V::null() {
+                    elements += 1;
+                }
+
+                index += 1;
             }
         }
         elements
@@ -395,17 +450,19 @@ where
             // If the cell was found, but the value is default, then it means
             // that this cell has already been erased, since the value
             // would have been set to default.
-            if value == V::default() {
+            if value == V::null() {
                 return None;
             }
 
             match cell.value.compare_exchange(
                 value,
-                V::default(),
+                V::null(),
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Some(value),
+                Ok(_) => {
+                    return Some(value);
+                }
                 Err(updated) => {
                     // Another thread wrote to the cell before we exchanged, we
                     // can treat this as if we erased the cell and then the new
@@ -441,7 +498,7 @@ where
 
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a reference to the cell if the find succeeded.
-    fn find(&self, hash: HashedKey) -> Option<&'a AtomicCell<V>> {
+    pub(crate) fn find(&self, hash: HashedKey) -> Option<&'a AtomicCell<V>> {
         debug_assert!(hash != Self::null_hash());
 
         loop {
@@ -452,7 +509,7 @@ where
             if let Some(cell) = self.find_inner(hash, buckets, size_mask) {
                 let value = cell.value.load(Ordering::Acquire);
                 if value != V::redirect() {
-                    if value == V::default() {
+                    if value == V::null() {
                         return None;
                     }
                     return Some(cell);
@@ -526,7 +583,7 @@ where
         let mut cells_in_use = 0;
         for _ in 0..Self::CELLS_IN_USE {
             let cell = get_cell(src_buckets, index, size_mask);
-            if cell.value.load(Ordering::Relaxed) != V::default() {
+            if cell.value.load(Ordering::Relaxed) != V::null() {
                 cells_in_use += 1;
             }
             index += 1;
@@ -569,7 +626,7 @@ where
     }
 
     /// Makes the calling thread participate in the migtration.
-    fn participate_in_migration(&self) {
+    pub(crate) fn participate_in_migration(&self) {
         let migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
 
         // Nothing to do here ...
@@ -580,9 +637,18 @@ where
         // First check if that migration is in the completion stage,
         // in which case we should go and clean up some of the old
         // migration tables.
-        if migrator.finishing() || (migrator.in_process() && !migrator.initialization_complete()) {
+        if migrator.finishing() {
+            while migrator.finishing() {
+                //...
+            }
             // Clean up old tables, then return ...
             return;
+        }
+
+        if migrator.in_process() && !migrator.initialization_complete() {
+            while migrator.initialization_complete() {
+                //...
+            }
         }
 
         // Otherwise we need to join in the migration;
@@ -772,41 +838,37 @@ where
 
         // Start by checking the hashed cell. It's quite unlikely that it belongs
         // to the bucket it hashes to, but this is fast if it does.
-        {
-            let cell = get_cell(buckets, index, size_mask);
-            let mut probe_hash = cell.hash.load(Ordering::Relaxed);
+        let cell = get_cell(buckets, index, size_mask);
+        let mut probe_hash = cell.hash.load(Ordering::Relaxed);
 
-            if probe_hash == Self::null_hash() {
-                match cell.hash.compare_exchange(
-                    probe_hash,
-                    hash,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        // Succeeded in setting the hash and claiming the cell, try
-                        // and exchange the value:
-                        return Self::exchange_value(cell, value, V::default());
-                    }
-                    Err(new_hash) => {
-                        // Lost the race, so likely go and search through the probe chain.
-                        probe_hash = new_hash;
-                    }
+        if probe_hash == Self::null_hash() {
+            match cell
+                .hash
+                .compare_exchange(probe_hash, hash, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    // Succeeded in setting the hash and claiming the cell, try
+                    // and exchange the value:
+                    return Self::exchange_value(cell, value, V::null());
+                }
+                Err(new_hash) => {
+                    // Lost the race, so likely go and search through the probe chain.
+                    probe_hash = new_hash;
                 }
             }
+        }
 
-            // Hash already in table, exchange and return the value.
-            if probe_hash == hash {
-                let old_value = cell.value.load(Ordering::Acquire);
+        // Hash already in table, exchange and return the value.
+        if probe_hash == hash {
+            let old_value = cell.value.load(Ordering::Acquire);
 
-                // Check if the table is being moved:
-                if old_value == V::redirect() {
-                    return ConcurrentInsertResult::Migration(value);
-                }
-
-                // Otherwise try and exchange the old value with the new one.
-                return Self::exchange_value(cell, value, old_value);
+            // Check if the table is being moved:
+            if old_value == V::redirect() {
+                return ConcurrentInsertResult::Migration(value);
             }
+
+            // Otherwise try and exchange the old value with the new one.
+            return Self::exchange_value(cell, value, old_value);
         }
 
         // Follow the linked probes to find a new cell.
@@ -841,20 +903,20 @@ where
                             break;
                         }
                     }
+                }
 
-                    // Only hashes in the same bucket can be linked:
-                    debug_assert!((probe_hash ^ hash) as usize & size_mask == 0);
+                // Only hashes in the same bucket can be linked:
+                debug_assert!((probe_hash ^ hash) as usize & size_mask == 0);
 
-                    if probe_hash == hash {
-                        let old_value = cell.value.load(Ordering::Acquire);
+                if probe_hash == hash {
+                    let old_value = cell.value.load(Ordering::Acquire);
 
-                        // Check if the table is being moved:
-                        if old_value == V::redirect() {
-                            return ConcurrentInsertResult::Migration(value);
-                        }
-
-                        return Self::exchange_value(cell, value, old_value);
+                    // Check if the table is being moved:
+                    if old_value == V::redirect() {
+                        return ConcurrentInsertResult::Migration(value);
                     }
+
+                    return Self::exchange_value(cell, value, old_value);
                 }
 
                 // We updated the index and the delta value, so we will go back
@@ -889,7 +951,7 @@ where
                                 // Now link the cell to the previous cell in the same bucket:
                                 let offset = (index - prev_link_index) as u8;
                                 prev_link.store(offset, Ordering::Relaxed);
-                                return Self::exchange_value(cell, value, V::default());
+                                return Self::exchange_value(cell, value, V::null());
                             }
                             Err(updated) => probe_hash = updated,
                         }
@@ -954,8 +1016,7 @@ where
 
         // Success: just return the old value, as the desired value is now stord.
         if exchange_result.is_ok() {
-            // Success, we can return the old value
-            if old_value == V::default() {
+            if old_value == V::null() {
                 return ConcurrentInsertResult::NewInsert;
             } else {
                 return ConcurrentInsertResult::Replaced(old_value);
@@ -1004,7 +1065,7 @@ where
 
                 // FIXME: We should check if the stored type is directly writable ..
                 let cell_value = &mut buckets[i].cells[cell].value;
-                *cell_value = Atomic::new(V::default());
+                *cell_value = Atomic::new(V::null());
             }
         }
 
@@ -1149,11 +1210,11 @@ impl<K, V> Table<K, V> {
 /// Here we need the value to be atomic. Since V is generic, it's possible that
 /// there is no built-in atomic support for it, in which case the `Atomic`
 /// type will fall back to using an efficient spinlock implementation.
-pub(super) struct AtomicCell<V> {
+pub struct AtomicCell<V> {
     /// The hashed value of the cell.
-    hash: AtomicHashedKey,
+    pub(crate) hash: AtomicHashedKey,
     /// The value assosciated with the hash.
-    value: Atomic<V>,
+    pub(crate) value: Atomic<V>,
 }
 
 /// Struct which stores buckets of cells. Each bucket stores four cells
@@ -1171,36 +1232,6 @@ pub(super) struct Bucket<K, V> {
     /// Placeholder for the key.
     _key: std::marker::PhantomData<K>,
 }
-
-/*
-/// Allocates `count` number of elements of type T, using the `allocator`.
-fn allocate<T, A: Allocator>(allocator: &A, count: usize) -> *mut T {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size * count, align).unwrap();
-
-    // Again, unwrap the allocation result. It should never fail to allocate.
-    allocator.allocate(layout).unwrap().as_ptr() as *mut T
-}
-
-/// Deallocates `count` number of elements of type T, using the `allocator`.
-fn deallocate<T, A: Allocator>(allocator: &A, ptr: *mut T, count: usize) {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
-
-    // We unwrap here because we want to panic if we fail to get a valid layout
-    let layout = Layout::from_size_align(size * count, align).unwrap();
-
-    // Again, unwrap the allocation result. It should never fail to allocate.
-    let raw_ptr = ptr as *mut u8;
-    let nonnull_ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
-    unsafe {
-        allocator.deallocate(nonnull_ptr, layout);
-    }
-}
-*/
 
 /// A struct for a migration source, which stores a pointer to the source buckets
 /// to migrate from, and the index in the source table.
@@ -1346,7 +1377,7 @@ impl<K, V: Value> Migrator<K, V> {
                 // a redirect marker in its place.
                 if src_hash == LeapMap::<K, V, H, A>::null_hash() {
                     match cell.value.compare_exchange(
-                        V::default(),
+                        V::null(),
                         V::redirect(),
                         Ordering::Relaxed,
                         Ordering::Relaxed,
@@ -1365,7 +1396,7 @@ impl<K, V: Value> Migrator<K, V> {
                 } else {
                     // Check for deleted/uninitialized value ...
                     let mut src_value = cell.value.load(Ordering::Relaxed);
-                    if src_value == V::default() {
+                    if src_value == V::null() {
                         // Need to place a redirect as above:
                         match cell.value.compare_exchange(
                             src_value,
