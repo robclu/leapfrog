@@ -1,5 +1,6 @@
-use crate::util::round_to_pow2;
+use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
+use std::alloc::{Allocator, Global};
 use std::{
     borrow::Borrow,
     default::Default,
@@ -12,20 +13,36 @@ pub(crate) type HashedKey = u64;
 /// Struct which stores a cell in a hash map. A cell is simply a hash (rather
 /// than the key iteself) and the value associated with the key for which the
 /// hash is associated.
-#[derive(Clone, Copy)]
-struct Cell<V: Value> {
+struct Cell<V> {
     /// The hashed value of the cell.
     hash: HashedKey,
     /// The value assosciated with the hash.
     value: V,
 }
 
-impl<V: Value> Default for Cell<V> {
-    fn default() -> Cell<V> {
-        Cell {
-            hash: HashedKey::default(),
-            value: V::default(),
-        }
+/// Underlying table for a [HashMap]. This stores a pointer to the buckets and
+/// the mask for the number of cells which are stored in the table.
+struct Table<K, V> {
+    /// Pointer to the buckets for the table.
+    buckets: *mut Bucket<K, V>,
+    /// The mask for indexing into the buckets.
+    size_mask: usize,
+}
+
+impl<K, V> Table<K, V> {
+    /// Gets a mutable slice of the table buckets.
+    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+    }
+
+    /// Gets a slice of the table buckets.
+    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+    }
+
+    /// Returns the number of cells in the table.
+    pub fn size(&self) -> usize {
+        self.size_mask + 1
     }
 }
 
@@ -34,8 +51,7 @@ impl<V: Value> Default for Cell<V> {
 /// the offset to the cell which is the start of the probe chain for the cell.
 /// The second delta value provides the offset to the next link in the probe
 /// chain once a search along the probe chain has started.
-#[derive(Clone)]
-struct Bucket<K, V: Value> {
+struct Bucket<K, V> {
     /// Delta values for the cells. The first 4 values are the delta values to
     /// the start of the probe chain, and the second 4 values are the delta
     /// values to the next probe in the chain, for each cell, respectively.
@@ -44,16 +60,6 @@ struct Bucket<K, V: Value> {
     cells: [Cell<V>; 4],
     /// Placeholder for the key
     _key: std::marker::PhantomData<K>,
-}
-
-impl<K, V: Value> Default for Bucket<K, V> {
-    fn default() -> Bucket<K, V> {
-        Bucket {
-            deltas: [0u8; 8],
-            cells: [Cell::<V>::default(); 4],
-            _key: std::marker::PhantomData::default(),
-        }
-    }
 }
 
 /// Defines the result of an insert into the [HashMap].
@@ -90,20 +96,80 @@ enum InsertResult<V> {
 ///
 /// This version is *not* thread-safe. [crate::LeapMap] is a thread-safe version of the
 /// map.
-pub struct HashMap<K, V: Value, H = BuildHasherDefault<MurmurHasher>> {
-    /// Groups of cells which store the map data.
-    buckets: Vec<Bucket<K, V>>,
+pub struct HashMap<K, V, H = BuildHasherDefault<MurmurHasher>, A: Allocator = Global> {
+    /// Table for the map.
+    table: *mut Table<K, V>,
     /// The hasher for the map.
     hash_builder: H,
-    /// Mask for the size of the table.
-    size_mask: usize,
+    /// Allocator for the buckets.
+    allocator: A,
+    /// The number of elements in the map.
+    size: usize,
 }
 
-impl<K, V, H> HashMap<K, V, H>
+impl<'a, K, V, H, A: Allocator> HashMap<K, V, H, A> {
+    /// Gets the capacity of the hash map.
+    pub fn capacity(&self) -> usize {
+        self.get_table().size()
+    }
+
+    /// Gets a reference to the map's table, using the specified `ordering` to
+    /// load the table reference.
+    fn get_table(&self) -> &'a Table<K, V> {
+        unsafe { &*self.table }
+    }
+
+    /// Gets a mutable reference to the map's table, using the specified
+    /// `ordering` to load the table reference.
+    fn get_table_mut(&self) -> &'a mut Table<K, V> {
+        unsafe { &mut *self.table }
+    }
+}
+
+impl<K, V> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+{
+    /// Creates the hash map with space for the default number of elements, which
+    /// will use the global allocator for allocation of the map data.
+    pub fn new() -> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+        Self::new_in(Global)
+    }
+
+    /// Creates the hash map with space for `capacity` elements, which will use
+    /// the global allocator for allocation of the map data.
+    pub fn with_capacity(
+        capacity: usize,
+    ) -> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+        Self::with_capacity_and_hasher_in(
+            capacity,
+            BuildHasherDefault::<MurmurHasher>::default(),
+            Global,
+        )
+    }
+}
+
+impl<K, V, H> HashMap<K, V, H, Global>
 where
     K: Eq + Hash + Clone,
     V: Value,
     H: BuildHasher + Default,
+{
+    /// Creates the hash map with space for `capacity` elements, using the
+    /// `builder` to create the hasher, which will use the global allocator for
+    /// allocation of the map data.
+    pub fn with_capacity_and_hasher(capacity: usize, builder: H) -> HashMap<K, V, H, Global> {
+        Self::with_capacity_and_hasher_in(capacity, builder, Global)
+    }
+}
+
+impl<'a, K, V, H, A> HashMap<K, V, H, A>
+where
+    K: Eq + Hash + Clone + 'a,
+    V: Value + 'a,
+    H: BuildHasher + Default,
+    A: Allocator,
 {
     /// The default initial size of the map.
     const INITIAL_SIZE: usize = 8;
@@ -115,82 +181,61 @@ where
     /// The number of cells to use to estimate if the map is full.
     const CELLS_IN_USE: usize = Self::LINEAR_SEARCH_LIMIT >> 1;
 
-    /// Number of cells per bucked.
-    const CELLS_PER_BUCKET: usize = 4;
-
-    /// Creates the hash map with space for the default number of elements.
-    pub fn new() -> HashMap<K, V, H> {
-        HashMap {
-            buckets: Self::create_buckets(Self::INITIAL_SIZE),
-            hash_builder: H::default(),
-            size_mask: Self::INITIAL_SIZE - 1,
-        }
+    /// Creates the hash map with space for the default number of elements, using
+    /// the provided `allocator` to allocate data for the map.
+    pub fn new_in(allocator: A) -> HashMap<K, V, H, A> {
+        Self::with_capacity_and_hasher_in(Self::INITIAL_SIZE, H::default(), allocator)
     }
 
-    /// Creates the hash map with space for `size` number of key-value pairs.
-    ///
-    /// # Assertations
-    ///
-    /// This will assert if `size` is not a power of two.
-    ///
-    /// # Arguments
-    ///
-    /// * `size`         - The initial number of elements for the map.
-    pub fn with_capacity(size: usize) -> HashMap<K, V, H> {
-        assert!(size % 2 == 0);
-
+    /// Creates the hash map with space for the `capacity` number of elements
+    /// using the provided `builder` to build the hasher, and `allocator` for
+    /// allocating the map data.
+    pub fn with_capacity_and_hasher_in(
+        capacity: usize,
+        builder: H,
+        allocator: A,
+    ) -> HashMap<K, V, H, A> {
+        let table = Self::allocate_and_init_table(&allocator, capacity);
         HashMap {
-            buckets: Self::create_buckets(size),
-            hash_builder: H::default(),
-            size_mask: size - 1,
-        }
-    }
-
-    /// Creates the hash map with space for `size` number of key-value pairs,
-    /// and with the `builder` to use to build a hasher.
-    ///
-    /// # Assertations
-    ///
-    /// This will assert if `size` is not a power of two.
-    ///
-    /// # Arguments
-    ///
-    /// * `size`         - The initial number of elements for the map.
-    /// * `hash_builder` - The builder to create a hasher with.
-    pub fn with_capacity_and_hasher(size: usize, builder: H) -> HashMap<K, V, H> {
-        assert!(size % 2 == 0);
-
-        HashMap {
-            buckets: Self::create_buckets(size),
+            table,
             hash_builder: builder,
-            size_mask: size - 1,
+            allocator,
+            size: 0,
         }
     }
 
-    /// Returns the capacity of the map. This is the number of elements that
-    /// that map can hold without having to resize/reallocate. It may be able
-    /// to hold more, but it can hold *at least* this many.
-    pub fn capacity(&self) -> usize {
-        self.buckets.capacity() * Self::CELLS_PER_BUCKET
+    /// Returns the hashed value for the `key` as usize.
+    pub fn hash_usize<Q: ?Sized>(&self, key: &Q) -> usize
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        make_hash::<K, Q, H>(&self.hash_builder, key) as usize
     }
 
     /// Inserts a key-value pair into the map.
     ///
-    /// If the map did not have this key present, None is returned.
+    /// If the map did not have this key present, `None` is returned.
     ///
     /// If the map did have this key present, the value is updated and the old
     /// value is returned.
     ///
-    /// # Arguments
+    /// # Examples
     ///
-    /// * `key`   - The key to use to insert the value into the map.
-    /// * `value` - The value to insert into the map for the key.
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// assert_eq!(map.insert(37, 12), None);
+    /// assert_eq!(map.insert(37, 14), Some(12));
+    /// ```
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let mut state = self.hash_builder.build_hasher();
         key.hash(&mut state);
         let hash = state.finish();
         loop {
-            match Self::insert_or_find(hash, value, &mut self.buckets, self.size_mask) {
+            let size_mask = self.get_table().size_mask;
+            let buckets = self.get_table_mut().bucket_slice_mut();
+            match Self::insert_or_find(hash, value, buckets, size_mask) {
+                //match Self::insert_or_find(hash, value, &mut self.buckets, self.size_mask) {
                 InsertResult::Overflow(overflow_index) => {
                     // Resize and move into a new map, then try again.
                     // If this happens on the first iteration, then deleted cells
@@ -205,18 +250,26 @@ where
                     return Some(old_value);
                 }
                 InsertResult::NewInsert => {
+                    self.size += 1;
                     return None;
                 }
             }
         }
     }
 
-    /// Returns a reference to the value corresponding to the key.
+    /// Returns an optional reference type to the value corresponding to the key.
     ///
-    /// # Arguments
+    /// # Examples
     ///
-    /// * `key` - The key to get the value for.
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(0, 12);
+    /// if let Some(value) = map.get(&0) {
+    ///     assert_eq!(*value, 12);
+    /// }
+    /// assert!(map.get(&2).is_none());
+    ///```
+    pub fn get<Q: ?Sized>(&'a self, key: &Q) -> Option<&'a V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
@@ -224,27 +277,43 @@ where
         self.find(make_hash::<K, Q, H>(&self.hash_builder, &key))
     }
 
-    /// Returns a reference to the value corresponding to the key.
+    /// Returns a mutable reference type to the value corresponding to the `key`.
     ///
-    /// # Argumentts
+    /// # Examples
     ///
-    /// * `key` - The key for which to get a mutable reference to the value.
-    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut V>
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(1, 12);
+    /// if let Some(value) = map.get_mut(&1) {
+    ///     *value = 14;
+    /// }
+    /// assert_eq!(*map.get(&1).unwrap(), 14);
+    /// assert!(map.get(&2).is_none());
+    ///```
+    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&'a mut V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        let size_mask = self.size_mask;
-        let buckets = &mut self.buckets;
+        //let size_mask = self.size_mask;
+        //let buckets = &mut self.buckets;
+        let table = self.get_table_mut();
+        let size_mask = table.size_mask;
+        let buckets = table.bucket_slice_mut();
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
         Self::find_mut(buckets, hash, size_mask)
     }
 
-    /// Returns true if the map contains the key.
+    /// Returns true if the map contains the specified `key`.
     ///
-    /// # Arguments
+    /// # Examples
     ///
-    /// * `key` - The key to determine if is in the map.
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(1, 47u64);
+    /// assert_eq!(map.contains_key(&1), true);
+    /// assert_eq!(map.contains_key(&2), false);
+    /// ```
     pub fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -253,11 +322,17 @@ where
         self.get(key).is_some()
     }
 
-    /// Removes the item assosciated with the key.
+    /// Removes the key from the map, returning the value at the key if the key
+    /// was present in the map.
     ///
-    /// # Arguments
+    /// # Examples
     ///
-    /// * `key` - The key to remove the value for.
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(2, 17);
+    /// assert_eq!(map.remove(&2), Some(17));
+    /// assert_eq!(map.remove(&2), None);
+    /// ```
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -268,22 +343,40 @@ where
         // deleted, and the next time the map is resized they will be removed.
         if let Some(v) = self.get_mut(key) {
             let old_value = *v;
-            *v = V::default();
+            if old_value == V::null() {
+                return None;
+            }
+            *v = V::null();
+            self.size -= 1;
             Some(old_value)
         } else {
             None
         }
     }
 
+    /// Returns the length of the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(2, 17);
+    /// assert_eq!(map.len(), 1);
+    /// map.insert(4, 17);
+    /// assert_eq!(map.len(), 2);
+    /// map.remove(&2);
+    /// assert_eq!(map.len(), 1);
+    /// map.remove(&4);
+    /// assert_eq!(map.len(), 0);
+    /// map.remove(&4);
+    /// assert_eq!(map.len(), 0);
+    /// ```
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
     /// Inserts a new cell into the given `buckets`, where the max number of
     /// buckets is `size_mask` + 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `hash`      - The hash value to use to find a cell.
-    /// * `value`     - The value to insert into the buckets.
-    /// * `buckets`   - The buckets to insert the hash into.
-    /// * `size_mask` - The size mask for number of elements in the buckets.
     ///
     /// # Returns
     ///
@@ -302,7 +395,7 @@ where
     fn insert_or_find(
         hash: HashedKey,
         value: V,
-        buckets: &mut Vec<Bucket<K, V>>,
+        buckets: &mut [Bucket<K, V>],
         size_mask: usize,
     ) -> InsertResult<V> {
         let mut index = hash as usize;
@@ -312,7 +405,7 @@ where
                 let old_value = cell.value;
                 cell.value = value;
                 return InsertResult::Found(old_value);
-            } else if cell.hash == HashedKey::default() {
+            } else if cell.hash == Self::null_hash() {
                 cell.hash = hash;
                 cell.value = value;
                 return InsertResult::NewInsert;
@@ -351,7 +444,7 @@ where
             // We found an empty cell, so reserve it and link it
             // to the previous cell in the same bucket.
             let mut cell = Self::get_cell_mut(buckets, index, size_mask);
-            if cell.hash == HashedKey::default() {
+            if cell.hash == Self::null_hash() {
                 cell.hash = hash;
                 cell.value = value;
 
@@ -377,49 +470,38 @@ where
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a Some(&v) if the find succeeded, otherwise this will
     /// return None.
-    ///
-    /// # Arguments
-    ///
-    /// * `hash` - The hashed value to find.
     fn find(&self, hash: HashedKey) -> Option<&V> {
-        debug_assert!(hash != HashedKey::default());
+        debug_assert!(hash != Self::null_hash());
+
+        let buckets = self.get_table().bucket_slice();
+        let size_mask = self.get_table().size_mask;
 
         let mut index = hash as usize;
-        let cell = Self::get_cell(&self.buckets, index, self.size_mask);
+        let cell = Self::get_cell(buckets, index, size_mask);
         if cell.hash == hash {
             return Some(&cell.value);
         }
 
         // Now we need to follow the probe chain for the bucket.
-        let mut delta = Self::get_first_delta(&self.buckets, index, self.size_mask);
+        let mut delta = Self::get_first_delta(buckets, index, size_mask);
         while delta != 0 {
             index += delta as usize;
-            let cell = Self::get_cell(&self.buckets, index, self.size_mask);
+            let cell = Self::get_cell(buckets, index, size_mask);
             if cell.hash == hash {
                 return Some(&cell.value);
             }
 
-            delta = Self::get_second_delta(&self.buckets, index, self.size_mask);
+            delta = Self::get_second_delta(buckets, index, size_mask);
         }
 
         None
     }
 
     /// Tries to find the value for the `hash` without inserting into the
-    /// `buckets`. This will reuturn a Some(&mut v) if the find succeeded,
-    /// otherwise this will return None.
-    ///
-    /// # Arguments
-    ///
-    /// * `buckets`   - The buckets in which to look for the hash.
-    /// * `hash`      - The hash to look for in the buckets.
-    /// * `size_mask` - Mask for the total number of cells in the buckets.
-    fn find_mut(
-        buckets: &mut Vec<Bucket<K, V>>,
-        hash: HashedKey,
-        size_mask: usize,
-    ) -> Option<&mut V> {
-        debug_assert!(hash != HashedKey::default());
+    /// `buckets`. This will reuturn a reference to the old value if the find
+    /// was successful.
+    fn find_mut(buckets: &mut [Bucket<K, V>], hash: HashedKey, size_mask: usize) -> Option<&mut V> {
+        debug_assert!(hash != Self::null_hash());
 
         let mut index = hash as usize;
         let mut delta = 0u8;
@@ -450,19 +532,18 @@ where
         }
     }
 
-    /// Moves the current map buckets into a larger container of buckets.
-    ///
-    /// # Arguments
-    ///
-    /// * `overflow_index` - The index at which an attempt to insert would have
-    ///                      overflowed the delta value.
+    /// Moves the current map buckets into a larger container of buckets, where
+    /// `overflow_index` is the index at which an overflow of the delta value
+    /// would have happened.
     fn move_to_new_buckets(&mut self, overflow_index: usize) {
         // Estimate the number of cells
         let mut index = overflow_index - Self::CELLS_IN_USE;
         let mut cells_in_use = 0;
 
+        let buckets = self.get_table().bucket_slice();
+        let size_mask = self.get_table().size_mask;
         for _ in 0..Self::CELLS_IN_USE {
-            let cell = Self::get_cell(&self.buckets, index, self.size_mask);
+            let cell = Self::get_cell(buckets, index, size_mask);
             if cell.value != V::default() {
                 cells_in_use += 1;
             }
@@ -471,7 +552,7 @@ where
 
         // Estimate how much we need to resize by:
         let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
-        let in_use_estimated = (self.size_mask + 1) as f32 * ratio;
+        let in_use_estimated = (size_mask + 1) as f32 * ratio;
         let estimated = round_to_pow2((in_use_estimated * 2.0) as usize);
         let mut new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
 
@@ -494,25 +575,25 @@ where
     ///
     /// Currently this doesn't use a custom allocator, which needs to be changed
     /// to improve performance.
-    ///
-    /// # Argments
-    ///
-    /// * `size` - The number of elements in the new map.
     fn try_move_to_new_buckets(&mut self, size: usize) -> bool {
-        let source_size = self.size_mask + 1;
-        let size_mask = size - 1;
+        let source_buckets = self.get_table().bucket_slice();
+        let source_size_mask = self.get_table().size_mask;
+        let source_size = source_size_mask + 1;
 
         // This is very bad for performance, we need to allocate this from
         // somewhere else ...
-        let mut buckets = Self::create_buckets(size);
+        let dst_table_ptr = Self::allocate_and_init_table(&self.allocator, size);
+        let dst_table = unsafe { &mut *dst_table_ptr };
+        let dst_size_mask = dst_table.size_mask;
+        let dst_buckets = dst_table.bucket_slice_mut();
 
         for source_index in 0..source_size {
-            let cell = Self::get_cell(&self.buckets, source_index, self.size_mask);
+            let cell = Self::get_cell(source_buckets, source_index, source_size_mask);
             if cell.value != V::default() {
-                match Self::insert_or_find(cell.hash, cell.value, &mut buckets, size_mask) {
+                match Self::insert_or_find(cell.hash, cell.value, dst_buckets, dst_size_mask) {
                     InsertResult::Overflow(_) => {
                         // New bucekts are too small, failed to move.
-                        // New buckets will be automatically cleaned up
+                        Self::deallocate_table(&self.allocator, dst_table_ptr);
                         return false;
                     }
                     InsertResult::Found(_) => {
@@ -526,34 +607,63 @@ where
             }
         }
 
-        // Succeeded in moving all buckets, so update the map:
-        self.buckets = buckets;
-        self.size_mask = size_mask;
+        // Succeeded in moving all buckets, so update the map table:
+        Self::deallocate_table(&self.allocator, self.table);
+        self.table = dst_table_ptr;
 
         true
     }
 
-    /// Creates buckets with sufficient space for `size` buckets.
-    ///
-    /// FIXME: This needs to get the data from some other allocator, because
-    ///        we can't be allocting all the time.
-    fn create_buckets(size: usize) -> Vec<Bucket<K, V>> {
-        // Check that the size is a power of two:
-        debug_assert!(size >= 4 && (size & (size - 1)) == 0);
+    /// Allocates and initializes buckets which will hold `cells` number of
+    /// cells, using the provided `allocator`.
+    fn allocate_and_init_table(allocator: &A, cells: usize) -> *mut Table<K, V> {
+        assert!(cells >= 4 && (cells % 2 == 0));
+        let bucket_count = cells >> 2;
+        let bucket_ptr =
+            allocate::<Bucket<K, V>, A>(&allocator, bucket_count, AllocationKind::Uninitialized);
+        let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
-        // Each bucket holds 4 cells, hence division by 4.
-        vec![Bucket::<K, V>::default(); size >> 2]
+        // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
+        // we can write them as zero, rather than calling the atomic versions
+        for i in 0..bucket_count {
+            unsafe {
+                let bucket_deltas = &mut buckets[i].deltas as *mut u8;
+                std::ptr::write_bytes(bucket_deltas, 0, 8);
+            };
+
+            for cell in 0..4 {
+                unsafe {
+                    let cell_hash = &mut buckets[i].cells[cell].hash as *mut HashedKey;
+                    std::ptr::write_bytes(cell_hash, 0, 1);
+                };
+
+                // FIXME: We should check if the stored type is directly writable ..
+                let cell_value = &mut buckets[i].cells[cell].value;
+                *cell_value = V::null();
+            }
+        }
+
+        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1, AllocationKind::Uninitialized);
+        let table = unsafe { &mut *table_ptr };
+
+        table.buckets = bucket_ptr;
+        table.size_mask = cells - 1;
+
+        table_ptr
+    }
+
+    /// Deallocates the table pointed to by `table_ptr` using the `allocator`.
+    fn deallocate_table(allocator: &A, table_ptr: *mut Table<K, V>) {
+        let table = unsafe { &mut *table_ptr };
+        let bucket_ptr = table.buckets;
+        let bucket_count = table.size() >> 2;
+        deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
+        deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
     }
 
     /// Gets a reference to a cell for the `index` from the `buckets`.
-    ///
-    /// # Arguments
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
     #[inline]
-    fn get_cell(buckets: &Vec<Bucket<K, V>>, index: usize, size_mask: usize) -> &Cell<V> {
+    fn get_cell(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &Cell<V> {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         &buckets[bucket_index].cells[cell_index]
@@ -561,47 +671,26 @@ where
 
     /// Gets a mutable reference mutable to a cell for the `index` from the
     /// `buckets`.
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
     #[inline]
-    fn get_cell_mut(
-        buckets: &mut Vec<Bucket<K, V>>,
-        index: usize,
-        size_mask: usize,
-    ) -> &mut Cell<V> {
+    fn get_cell_mut(buckets: &mut [Bucket<K, V>], index: usize, size_mask: usize) -> &mut Cell<V> {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         &mut buckets[bucket_index].cells[cell_index]
     }
 
-    /// Gets the first delta value for a cell with the given `index`. The first
-    /// delta value gives the offset to the start of the probe chain for bucket
-    /// assosciated with the `index`.
-    ///
-    /// # Arguments
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
+    /// Gets the first delta value for a cell with the given `index`.
     #[inline]
-    fn get_first_delta(buckets: &Vec<Bucket<K, V>>, index: usize, size_mask: usize) -> u8 {
+    fn get_first_delta(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> u8 {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         buckets[bucket_index].deltas[cell_index]
     }
 
     /// Gets a mutable reference to the first delta value for a cell with the
-    /// given `index`. The first delta value gives the offset to the start of
-    /// the probe chain for bucket assosciated with the `index`.
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
+    /// given `index`.
     #[inline]
     fn get_first_delta_mut(
-        buckets: &mut Vec<Bucket<K, V>>,
+        buckets: &mut [Bucket<K, V>],
         index: usize,
         size_mask: usize,
     ) -> &mut u8 {
@@ -610,36 +699,19 @@ where
         &mut buckets[bucket_index].deltas[cell_index]
     }
 
-    /// Gets the second delta value for a cell with the given `index`. The
-    /// second delta value gives the offset to the next probe in a probe chain
-    /// for a given cell.
-    ///
-    /// # Arguments
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
+    /// Gets the second delta value for a cell with the given `index`.
     #[inline]
-    fn get_second_delta(buckets: &Vec<Bucket<K, V>>, index: usize, size_mask: usize) -> u8 {
+    fn get_second_delta(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> u8 {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         buckets[bucket_index].deltas[cell_index + 4]
     }
 
-    // Gets the second delta value for a cell with the given index.
-
     /// Gets a mutable reference to the second delta value for a cell with the
-    /// given `index`. The second delta value gives the offset to the next probe
-    /// in a probe chain for a given cell.
-    ///
-    /// # Arguments
-    ///
-    /// * `buckets`   - The buckets to find the cell in.
-    /// * `index`     - The raw index value to convert to a bucket and cell index.
-    /// * `size_mask` - A mask for the number of elements in the buckets.
+    /// given `index`.
     #[inline]
     fn get_second_delta_mut(
-        buckets: &mut Vec<Bucket<K, V>>,
+        buckets: &mut [Bucket<K, V>],
         index: usize,
         size_mask: usize,
     ) -> &mut u8 {
@@ -648,101 +720,34 @@ where
         &mut buckets[bucket_index].deltas[cell_index + 4]
     }
 
-    /// Gets the index of the bucket for the `index`.
-    ///
-    /// # Arguments
-    ///
-    /// * `index`     - The raw index to get the index of the bucket for.
-    /// * `size_mask` - A mask for the total number of cells in the map.
+    /// Gets the index of the bucket for the spcified `index` and `size_mask`.
     #[inline]
     const fn get_bucket_index(index: usize, size_mask: usize) -> usize {
         (index & size_mask) >> 2
     }
 
-    /// Gets the index of the cell within a bucket for the `index`.
-    ///
-    /// # Arguments
-    ///
-    /// * `index`     - The raw index to get the index of the cell for.
-    /// * `size_mask` - A mask for the total number of cells in the map.
+    /// Gets the `index` of the cell within a bucket for the `index`.
     #[inline]
     const fn get_cell_index(index: usize) -> usize {
         index & 3
     }
+
+    /// Returns the null hash value.
+    #[inline]
+    const fn null_hash() -> HashedKey {
+        0 as HashedKey
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::{thread_rng, Rng};
+impl<K, V, H, A: Allocator> Drop for HashMap<K, V, H, A> {
+    fn drop(&mut self) {
+        let table = self.get_table_mut();
 
-    const KEYS_TO_INSERT: usize = 2048;
+        let bucket_ptr = table.buckets;
+        let bucket_count = table.size() >> 2;
+        deallocate::<Bucket<K, V>, A>(&self.allocator, bucket_ptr, bucket_count);
 
-    #[test]
-    fn create_hash_map() {
-        const ELEMENTS: usize = 8;
-        let map = HashMap::<u32, u32>::with_capacity(ELEMENTS);
-
-        assert!(map.capacity() >= ELEMENTS);
-    }
-
-    #[test]
-    fn hash_map_key_insert() {
-        let mut map = HashMap::<u64, u64>::with_capacity(KEYS_TO_INSERT);
-
-        let mut rng = thread_rng();
-        let start_index: u32 = rng.gen();
-        let value: u32 = rng.gen();
-        let relative_prime: u64 = value as u64 * 2 + 1;
-
-        let mut inserted: usize = 0;
-        let mut index = start_index;
-        let mut insert_checksum = 0u64;
-        while inserted < KEYS_TO_INSERT {
-            let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
-            key = key ^ (key >> 16);
-
-            // Don't add keys which are 0 or 1
-            if key >= 2 {
-                // Map is empty, we should only have None here:
-                if let Some(_old) = map.insert(key, key) {
-                    assert!(false);
-                }
-                inserted += 1;
-                insert_checksum = insert_checksum.wrapping_add(key);
-            }
-            index += 1;
-        }
-
-        let mut removed: usize = 0;
-        let mut index = start_index;
-        let mut remove_checksum = 0u64;
-        while removed < KEYS_TO_INSERT {
-            let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
-            key = key ^ (key >> 16);
-
-            if key >= 2 {
-                if let Some(value) = map.get(&key) {
-                    assert!(*value == key);
-                    remove_checksum = remove_checksum.wrapping_add(key);
-                    removed += 1;
-                } else {
-                    assert!(false);
-                }
-
-                // Check get mut as well
-                if let Some(value) = map.get_mut(&key) {
-                    assert!(*value == key);
-                } else {
-                    assert!(false);
-                }
-            }
-            index += 1;
-        }
-
-        assert_eq!(insert_checksum, remove_checksum);
-        assert_eq!(inserted, removed);
-
-        // TODO: Add check for iterator usage.
+        let table_ptr = self.table;
+        deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
     }
 }
