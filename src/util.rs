@@ -61,8 +61,20 @@ where
     res + T::from(1)
 }
 
+/// Kinds of allocation initialization.
+pub enum AllocationKind {
+    /// Allocation should be zeroed.
+    Zeroed,
+    /// Allocation can be uninitialized.
+    Uninitialized,
+}
+
 /// Allocates `count` number of elements of type T, using the `allocator`.
-pub(crate) fn allocate<T, A: Allocator>(allocator: &A, count: usize) -> *mut T {
+pub(crate) fn allocate<T, A: Allocator>(
+    allocator: &A,
+    count: usize,
+    kind: AllocationKind,
+) -> *mut T {
     let size = std::mem::size_of::<T>();
     let align = std::mem::align_of::<T>();
 
@@ -70,7 +82,10 @@ pub(crate) fn allocate<T, A: Allocator>(allocator: &A, count: usize) -> *mut T {
     let layout = Layout::from_size_align(size * count, align).unwrap();
 
     // Again, unwrap the allocation result. It should never fail to allocate.
-    allocator.allocate(layout).unwrap().as_ptr() as *mut T
+    match kind {
+        AllocationKind::Zeroed => allocator.allocate_zeroed(layout).unwrap().as_ptr() as *mut T,
+        AllocationKind::Uninitialized => allocator.allocate(layout).unwrap().as_ptr() as *mut T,
+    }
 }
 
 /// Deallocates `count` number of elements of type T, using the `allocator`.

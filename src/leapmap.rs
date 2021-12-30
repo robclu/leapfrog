@@ -1,5 +1,5 @@
 use crate::leapref::{Ref, RefMut};
-use crate::util::{allocate, deallocate, round_to_pow2};
+use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
 use atomic::Atomic;
 use std::alloc::{Allocator, Global};
@@ -8,7 +8,6 @@ use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
-use std::sync::Arc;
 
 /// The type used for hashed keys.
 type HashedKey = u64;
@@ -42,10 +41,10 @@ pub(super) enum ConcurrentInsertResult<V> {
 /// using `with_hasher` or `with_capacity_and_hasher`.
 ///
 /// This requires that the value type implement [Value], which is very simple
-/// to do, and requires that a sinlge element of the value to be stored to used
-/// as a redirect flag to indicate that the table is being moved. It's best
-/// to choose something that is simple and efficeint to evaluate. For example,
-/// u64 uses u64::MAX.
+/// to do, and requires that a two values of the value type to be stored to be
+/// used as a null and redirect flags. It's best to choose something that is
+/// simple and efficeint to evaluate. For example, u64 uses u64::MAX and u64::MAx -1,
+/// respectively.
 ///
 /// # Limitations
 ///
@@ -69,8 +68,8 @@ pub(super) enum ConcurrentInsertResult<V> {
 ///
 /// # Threading
 ///
-/// The map *is* thread-safe, and items cana be added and removed from any
-/// number of threads concurrently.
+/// The map *is* thread-safe, and items cana be added, removed, and updated from
+/// any number of threads concurrently.
 pub struct LeapMap<K, V, H = BuildHasherDefault<MurmurHasher>, A: Allocator = Global> {
     /// Pointer to the buckets for the map. This needs to be a pointer to that
     /// we can atomically get the buckets for operations, since when the map
@@ -177,7 +176,7 @@ where
         builder: H,
         allocator: A,
     ) -> LeapMap<K, V, H, A> {
-        let migrator_ptr = allocate::<Migrator<K, V>, A>(&allocator, 1);
+        let migrator_ptr = allocate::<Migrator<K, V>, A>(&allocator, 1, AllocationKind::Zeroed);
         let migrator = unsafe { &mut *migrator_ptr };
         migrator.initialize();
 
@@ -797,13 +796,18 @@ where
                 .store(std::ptr::null_mut(), Ordering::Relaxed);
 
             // FIXME: Move the source buckets into the cleanup queue:
-            let last_source = migrator.num_stale_sources.load(Ordering::Relaxed);
-            migrator
-                .num_stale_sources
-                .fetch_add(num_sources, Ordering::Relaxed);
+            let last_source = migrator.last_stale_source.load(Ordering::Relaxed);
+            //migrator
+            //    .num_stale_sources
+            //    .fetch_add(num_sources, Ordering::Relaxed);
             for i in 0..num_sources {
                 let source = migrator.sources.pop().unwrap();
                 let index = migrator.stale_source_index((last_source + i) as usize);
+
+                // If this is not null, then we have wrapped:
+                debug_assert!(
+                    migrator.stale_sources[index].load(Ordering::Relaxed) == std::ptr::null_mut()
+                );
 
                 migrator.stale_sources[index]
                     .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1055,7 +1059,8 @@ where
     fn allocate_and_init_table(allocator: &A, cells: usize) -> *mut Table<K, V> {
         assert!(cells >= 4 && (cells % 2 == 0));
         let bucket_count = cells >> 2;
-        let bucket_ptr = allocate::<Bucket<K, V>, A>(&allocator, bucket_count);
+        let bucket_ptr =
+            allocate::<Bucket<K, V>, A>(&allocator, bucket_count, AllocationKind::Uninitialized);
         let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
@@ -1078,7 +1083,7 @@ where
             }
         }
 
-        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1);
+        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1, AllocationKind::Uninitialized);
         let table = unsafe { &mut *table_ptr };
 
         table.buckets = bucket_ptr;
@@ -1265,8 +1270,8 @@ impl<K, V> MigrationSource<K, V> {
     }
 }
 
-/// A struct which migrates stale tables for a [LeapMap] into a non-stale destination
-/// table.
+/// A struct which migrates stale tables for a [LeapMap] into a non-stale
+/// destination table.
 struct Migrator<K, V> {
     /// Destination table for migrator.
     dst_table: AtomicPtr<Table<K, V>>,
@@ -1280,9 +1285,11 @@ struct Migrator<K, V> {
     overflowed: AtomicBool,
     /// The number of source tables to migrate:
     num_source_tables: AtomicU32,
+    /// Tables which have been migrated from and which need to be dealocated
     stale_sources: Vec<AtomicPtr<Table<K, V>>>,
-    num_stale_sources: AtomicU32,
+    /// The index of the last visible stale source table.
     last_stale_source: AtomicU32,
+    /// The index of the current stale source table to clean up.
     current_stale_source: AtomicU32,
 }
 
@@ -1312,20 +1319,19 @@ impl<K, V> Migrator<K, V> {
 
     /// Initializes the migrator.
     pub fn initialize(&mut self) {
-        let mut stale_sources = vec![];
+        self.stale_sources = Vec::with_capacity(Self::STALE_SOURCES);
         for _ in 0..Self::STALE_SOURCES {
-            stale_sources.push(AtomicPtr::<Table<K, V>>::new(std::ptr::null_mut()));
+            self.stale_sources
+                .push(AtomicPtr::<Table<K, V>>::new(std::ptr::null_mut()));
         }
 
         self.dst_table
             .store(std::ptr::null_mut(), Ordering::Relaxed);
         self.sources = vec![];
-        self.stale_sources = stale_sources;
         self.status.store(Self::RESET_FLAG, Ordering::Relaxed);
         self.remaining_units.store(0, Ordering::Relaxed);
         self.overflowed.store(false, Ordering::Relaxed);
         self.num_source_tables.store(0, Ordering::Relaxed);
-        self.num_stale_sources.store(0, Ordering::Relaxed);
         self.last_stale_source.store(0, Ordering::Relaxed);
         self.current_stale_source.store(0, Ordering::Relaxed);
     }

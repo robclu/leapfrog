@@ -6,7 +6,7 @@ use std::alloc::Allocator;
 use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::Ordering;
 
-/// Areference to an atomic cell in a [leapfrog::LeapMap], which cannot mutate
+/// Areference to an atomic cell in a [LeapMap], which cannot mutate
 /// the referenced cell value.
 pub struct Ref<'a, K, V, H, A: Allocator> {
     /// The atomic value which is being referenced.
@@ -64,8 +64,8 @@ where
     }
 }
 
-/// A reference type to a cell in a [leapfrog::LeapMap] which can mutate the
-/// referenced cell value.
+/// A reference type to a cell in a [LeapMap] which can mutate the referenced
+/// cell value.
 pub struct RefMut<'a, K, V, H, A: Allocator> {
     /// The atomic value which is being referenced.
     cell: &'a AtomicCell<V>,

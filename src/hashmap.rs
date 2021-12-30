@@ -1,12 +1,3 @@
-//==----------------------------------------------------------- ------------==//
-//                                  Flame
-//                      Copyright (c) 2021 Rob Clucas
-//      This file is distributed under the APACHE License, Version 2.0.
-//                         See LICENSE for details.
-//==------------------------------------------------------------------------==//
-
-//! Module for a single threaded hash map which uses a leapfrog probing strategy.
-
 use crate::util::round_to_pow2;
 use crate::{make_hash, MurmurHasher, Value};
 use std::{
@@ -97,8 +88,8 @@ enum InsertResult<V> {
 ///
 /// # Threading
 ///
-/// This version is *not* thread-safe. However, the extension to the thread-safe
-/// version is relatively straight forward, see [flame::collections::ConcurrentHashMap].
+/// This version is *not* thread-safe. [crate::LeapMap] is a thread-safe version of the
+/// map.
 pub struct HashMap<K, V: Value, H = BuildHasherDefault<MurmurHasher>> {
     /// Groups of cells which store the map data.
     buckets: Vec<Bucket<K, V>>,

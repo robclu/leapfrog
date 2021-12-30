@@ -1,12 +1,102 @@
-//==----------------------------------------------------------- ------------==//
-//                                  Flame
-//                      Copyright (c) 2021 Rob Clucas
-//      This file is distributed under the APACHE License, Version 2.0.
-//                         See LICENSE for details.
-//==------------------------------------------------------------------------==//
-
-//! Module for hash related functionality, such as efficient hash functions,
-//! and single-threaded and concurrent hash maps.
+//! A lock-free concurrent hash table which uses leapfrog probing.
+//!
+//! All map operations can be used fuilly concurrently, and is both efficient
+//! and scalable up to many threads. If the value type for the map supports atomic
+//! operations then this map will not lock, while if the value type does not support atomic
+//! operations then accessing the value uses an efficient spinlock implementation.
+//! The interface for the map has been kept as close as possible to
+//! `std::collections::HashMap`, however, there are some differences to ensure
+//! that concurrent operations are always correct and efficient.
+//!
+//! The biggest differences between the interface of this map and the
+//! `std::collections::HashMap`, is the types returned by (LeapMap::get) and
+//! [LeapMap::get_mut]. These methods return [Ref] and [RefMut] types,
+//! respectively, which have interfaces to allow for accessing the cells returned
+//! by the get calls, concurrently and correctly. As a result, it is not possible
+//! to get a reference to the cell's value, since the cell value type is atomic.
+//! The value can be accessed with `value()` for [Ref] and [RefMut] types, or
+//! can be set with `set_value()`, or updated with `update`, for [RefMut] types.
+//! These interfaces ensure that the most up to date value is loaded/stored/updated,
+//! and that if the referenced cell is invalidated or erased by other threads,
+//! the reference [Ref]/[RefMut] type is updated appropriately. These interfaces
+//! are designed to ensure that using the map does not require thinking about
+//! concurrency.
+//!
+//! The map uses [leapfrog probing](https://preshing.com/20160314/leapfrog-probing/)
+//! which is similar to [hopscotch hashing](https://en.wikipedia.org/wiki/Hopscotch_hashing)
+//! since it is based off of it. Leapfrog probing stores two offset per
+//! cell which are used to efficiently traverse a local neighbourhood of values
+//! around the cell to which a key hashes. This makes the map operations are cache
+//! friendly and scalable, even under heavy contention.
+//!
+//! # Performance
+//!
+//! This map has been benchmarked against other hash maps across multiple threads
+//! and multiple workloads. The benchmarks can be found [here](https://github.com/robclu/conc-map-bench).
+//! A snapshot of the results for a read heavy workload are the following (with
+//! throughput in Mops/second, cores in brackets, and performance realtive to
+//! `std::collections::HashMap` with RwLock):
+//!
+//! | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
+//! |------------------|----------------|--------------|-----------------|---------------|
+//! | RwLock + HashMap | 17.6           | 1.0          | 12.3            | 0.69          |
+//! | Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
+//! | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
+//! | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
+//!
+//! # Consistency
+//!
+//! All operations on the map are non-blocking, and accessing/updating a value
+//! in the map will not lock if the value type has built-in atomic support. All
+//! operations can therefore be overlapped from any number of threads.
+//!
+//! # Limitations
+//!
+//! Every design has tradeoffs, and there are some limitations for this map as
+//! well.
+//!
+//! The primary limitation of the map is that it does not store keys, but rather
+//! hashes of the keys. Thus far this has not been a limitation, however, it would
+//! be possible to add key support, if neccessary.
+//!
+//! You should use a hasher which produces unique hashes for each key. As only
+//! hashes are stored, if two keys hash to the same hash then the value for the
+//! keys which hash to the same value my be overwritten by each other if they
+//! are inserted concurrently. The [MurmurHasher] is the default hasher, and has
+//! been found to be efficient and passed all stress tests. The built in hasher
+//! and [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
+//! stress tests.
+//!
+//! See the first section for limitations relating to the types returned by
+//! [LeapMap::get] and [LeapMap::get_mut].
+//!
+//! Getting the length of the map does not return the length of the map, but rather an
+//! estimate of the length, unless the calling thread is the only thread operating
+//! on the map, and therefore that there are no other readers or writers. Additionally,
+//! the length is expensive to compute since it is not tracked as insertions and
+//! removals are performed. The overhead of doing so when under contention
+//! was found to be significant during benchmarking, and given that it's only an
+//! estimate, it's not worth the cost.
+//!
+//! The size of the map must always be a power of two.
+//!
+//! The value type for the map needs to implement the [Value] trait, which is
+//! simple enough to implement, however, two values need to be chosen, one as a
+//! null value and another as a redirect value. For integer types, MAX and MAX-1
+//! are used respectively. A good choice should be values which are efficient for
+//! comparison, so for strings, a single character which not be used as the first
+//! character for any valid string would be a good choice.
+//!
+//! # Resizing
+//!
+//! The buckets for the map are expanded when an insertion would result in a
+//! offset which would overflow the maximum probe offset (i.e, when it's not
+//! possible to find an empty cell within the probe neighbourhood), or shrunk
+//! when probes are too far apart. The resizing and subsequent removal of buckets
+//! from the old table to the new table will happen concurrently when multiple
+//! threads are attempting to modify the map concurrently, which makes the reszing
+//! efficient. Despite this, it is best to choose a larger size where possible,
+//! since it will ensure more stable performance of inserts and gets.
 
 #![feature(allocator_api)]
 #![feature(const_fn_trait_bound)]
@@ -26,6 +116,8 @@ use std::{
 
 pub use hashmap::HashMap;
 pub use leapmap::LeapMap;
+pub use leapref::Ref;
+pub use leapref::RefMut;
 
 /// Trait which represents a value which can be stored in a map.
 pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
