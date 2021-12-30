@@ -29,6 +29,9 @@
 //! around the cell to which a key hashes. This makes the map operations are cache
 //! friendly and scalable, even under heavy contention.
 //!
+//! This crate also provides [HashMap], which is an efficient single-threaded
+//! version of the concurrent lock-free hash map.
+//!
 //! # Performance
 //!
 //! This map has been benchmarked against other hash maps across multiple threads
@@ -43,6 +46,14 @@
 //! | Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
 //! | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
 //! | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
+//!
+//! Where [LeapMap] is performance limited is when rapidly growing the map, since
+//! the bottleneck then becomes the resizing and migration operations. The map
+//! *is not* designed to be resized often (resizing infrequently has very little
+//! impact on performance), so it's best to use an initial capacity which is close
+//! to the expected maximum number of elements for the table. The growing performace
+//! is approximately equivalent to DashMap's growing performance, so is still good,
+//! but will definitely become the bottleneck if resizing is frequent.
 //!
 //! # Consistency
 //!

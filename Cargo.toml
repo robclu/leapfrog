@@ -22,3 +22,8 @@ atomic = "0.5.1"
 [dev-dependencies]
 rand = "0.8.4"
 core_affinity = "0.5.10"
+criterion = "0.3.5"
+
+[[bench]]
+name = "hashmap"
+harness = false

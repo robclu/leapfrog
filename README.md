@@ -38,9 +38,9 @@ see the crate documentation:
 # License
 
 This crate is licensed under either the Apache License, Version 2.0, see 
-[here](LICENSE-APACHE) or[here](http://www.apache.org/licenses/LICENSE-2.0) or
-the MIT license see [here](LICENSE-MIT) or [here](http://opensource.org/licenses/MIT)
-at your chosing. It can fe used freely for both commercial and non-commercial 
+[here](LICENSE-APACHE) or [here](http://www.apache.org/licenses/LICENSE-2.0) or
+the MIT license see [here](LICENSE-MIT) or [here](http://opensource.org/licenses/MIT),
+at your chosing. It can be used freely for both commercial and non-commercial 
 applications, so long as you publish the contents of your chosen license file
 somewhere in your documentation.
 
