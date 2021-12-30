@@ -6,9 +6,22 @@ in HashMap (without somewhat limited functionality but better performance), and
 `LeapMap`, which is fast, lock-free concurrent version of the `HashMap`, where
 all operations can be used concurrently from any number of threads. The
 performance for most real-world use cases is around 2x the next fastest Rust
-hashmap, and around 35x `std::collections::HashMap` wrapped with RwLock. It
-also scales better than other hash map implementations. Benchmark results can
-be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
+hashmap, and around 13.6x `std::collections::HashMap` wrapped with RwLock for 16
+cores. It also scales better than other hash map implementations. Benchmark results 
+can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
+
+# Performance
+
+A snapshot of the results for a read heavy workload using a 16 core AMD 3950x
+CPU are the following (with throughput in Mops/second, cores in brackets, and 
+performance realtive to `std::collections::HashMap` with RwLock):
+
+| Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
+|------------------|----------------|--------------|-----------------|---------------|
+| RwLock + HashMap | 17.6           | 1.0          | 12.3            | 0.69          |
+| Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
+| DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
+| LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
 
 # Probing
 
