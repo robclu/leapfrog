@@ -114,7 +114,7 @@
 
 pub mod hashmap;
 pub mod leapmap;
-mod leapref;
+pub mod leapref;
 mod util;
 
 use crate::util::load_u64_le;
@@ -161,11 +161,6 @@ value_impl!(i64, i64::MAX, i64::MAX - 1);
 value_impl!(usize, usize::MAX, usize::MAX - 1);
 
 /// Creates a hash value from the `hash_builder` and `value`.
-///
-/// # Arguments
-///
-/// * `hash_builder` - The builder to builde the hasher with.
-/// * `value`        - The value to hash.
 pub(crate) fn make_hash<K, Q, S>(hash_builder: &S, value: &Q) -> u64
 where
     K: Borrow<Q>,

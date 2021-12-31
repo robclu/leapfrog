@@ -12,9 +12,9 @@ can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-ben
 
 # Performance
 
-A snapshot of the results for a read heavy workload using a 16 core AMD 3950x
-CPU are the following (with throughput in Mops/second, cores in brackets, and 
-performance realtive to `std::collections::HashMap` with RwLock):
+A snapshot of the results for the LeapMap on a read heavy workload using a 16 core 
+AMD 3950x CPU are the following (with throughput in Mops/second, cores in brackets, 
+and  performance realtive to `std::collections::HashMap` with RwLock):
 
 | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
 |------------------|----------------|--------------|-----------------|---------------|
@@ -22,6 +22,13 @@ performance realtive to `std::collections::HashMap` with RwLock):
 | Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
 | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
 | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
+
+For the single threaded leapfrog HashMap, a benchmark of random inserts and deletes (a port of
+[this](https://martin.ankerl.com/2019/04/01/hashmap-benchmarks-03-01-result-InsertHugeInt/) 
+benchmark of C++ hashmaps) has the rust std HashMap at around 30Mops/s and
+the leapfrog HashMap at around 40Mops/s, with Murmur as the hash function. The
+leapfrog HashMap is in the range of the fastest C++ hash maps from the linked benchmark 
+with the CPU locked to the same frequency.
 
 # Probing
 

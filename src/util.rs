@@ -3,7 +3,7 @@ use std::ops::{Add, BitOr, Shr, Sub, SubAssign};
 
 /// Loads the buffer `buf` as a u64.
 #[inline]
-pub(crate) fn load_u64_le(buf: &[u8], len: usize) -> u64 {
+pub fn load_u64_le(buf: &[u8], len: usize) -> u64 {
     debug_assert!(len <= buf.len());
     let mut data = 0u64;
     unsafe {

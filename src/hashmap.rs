@@ -235,7 +235,6 @@ where
             let size_mask = self.get_table().size_mask;
             let buckets = self.get_table_mut().bucket_slice_mut();
             match Self::insert_or_find(hash, value, buckets, size_mask) {
-                //match Self::insert_or_find(hash, value, &mut self.buckets, self.size_mask) {
                 InsertResult::Overflow(overflow_index) => {
                     // Resize and move into a new map, then try again.
                     // If this happens on the first iteration, then deleted cells
@@ -275,6 +274,7 @@ where
         Q: Hash + Eq,
     {
         self.find(make_hash::<K, Q, H>(&self.hash_builder, &key))
+            .map_or(None, |old| if *old == V::null() { None } else { Some(old) })
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -295,13 +295,17 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        //let size_mask = self.size_mask;
-        //let buckets = &mut self.buckets;
         let table = self.get_table_mut();
         let size_mask = table.size_mask;
         let buckets = table.bucket_slice_mut();
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        Self::find_mut(buckets, hash, size_mask)
+        Self::find_mut(buckets, hash, size_mask).map_or(None, |old| {
+            if *old == V::null() {
+                None
+            } else {
+                Some(old)
+            }
+        })
     }
 
     /// Returns true if the map contains the specified `key`.
