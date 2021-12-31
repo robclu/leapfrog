@@ -6,7 +6,7 @@ use rand::{thread_rng, Rng};
 use std::hash::BuildHasherDefault;
 
 const NUM_KEYS: usize = 1 << 14;
-const NUM_OPS: u64 = 5_000_000;
+const NUM_OPS: u64 = 5_000;
 
 fn bench_leapfrog_hashmap(c: &mut Criterion) {
     let mut group = c.benchmark_group("leapfrog_hashmap");
@@ -74,5 +74,5 @@ fn bench_std_hashmap(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_std_hashmap, bench_leapfrog_hashmap);
+criterion_group!(benches, bench_leapfrog_hashmap, bench_std_hashmap,);
 criterion_main!(benches);
