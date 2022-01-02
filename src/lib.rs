@@ -115,7 +115,7 @@
 pub mod hashmap;
 pub mod leapmap;
 pub mod leapref;
-mod util;
+pub mod util;
 
 use crate::util::load_u64_le;
 use std::borrow::Borrow;

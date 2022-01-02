@@ -14,7 +14,7 @@ pub fn load_u64_le(buf: &[u8], len: usize) -> u64 {
 
 /// Rounds the `value` up to the nearest power of two.
 #[inline]
-pub(crate) fn round_to_pow2<T>(value: T) -> T
+pub fn round_to_pow2<T>(value: T) -> T
 where
     T: SubAssign
         + Add<Output = T>

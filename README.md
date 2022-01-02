@@ -24,11 +24,11 @@ and  performance realtive to `std::collections::HashMap` with RwLock):
 | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
 
 For the single threaded leapfrog HashMap, a benchmark of random inserts and deletes (a port of
-[this](https://martin.ankerl.com/2019/04/01/hashmap-benchmarks-03-01-result-InsertHugeInt/) 
-benchmark of C++ hashmaps) has the rust std HashMap at around 30Mops/s and
-the leapfrog HashMap at around 40Mops/s, with Murmur as the hash function. The
-leapfrog HashMap is in the range of the fastest C++ hash maps from the linked benchmark 
-with the CPU locked to the same frequency.
+[this](https://martin.ankerl.com/2019/04/01/hashmap-benchmarks-03-03-result-RandomInsertErase/)
+benchmark of C++ hashmaps) has the rust std HashMap at around 57Mops/s and
+the leapfrog HashMap at around 80Mops/s, with Murmur as the hash function. The
+leapfrog HashMap has performance which is at least comparable to, if not better
+than, the fastest C++ hash maps from the linked benchmark.
 
 # Probing
 
