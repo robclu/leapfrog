@@ -49,7 +49,7 @@ where
     {
         loop {
             let value = self.cell.value.load(Ordering::Relaxed);
-            if value == V::redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
+            if value.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
                 self.map.participate_in_migration();
                 if let Some(new_cell) = self.map.find(self.hash) {
@@ -108,7 +108,7 @@ where
     {
         loop {
             let value = self.cell.value.load(Ordering::Relaxed);
-            if value == V::redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
+            if value.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
                 self.map.participate_in_migration();
                 if let Some(new_cell) = self.map.find(self.hash) {
@@ -139,7 +139,7 @@ where
         loop {
             let current = self.cell.value.load(Ordering::Relaxed);
 
-            if current == V::redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
+            if current.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
                 self.map.participate_in_migration();
                 if let Some(new_cell) = self.map.find(self.hash) {
@@ -147,7 +147,7 @@ where
                 } else {
                     assert!(false);
                 }
-            } else if current == V::null() {
+            } else if current.is_null() {
                 // Value has been erased, we can just return.
                 return None;
             } else {
@@ -178,7 +178,7 @@ where
             let mut updated = current;
             func(&mut updated);
 
-            if current == V::redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
+            if current.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
                 self.map.participate_in_migration();
                 if let Some(new_cell) = self.map.find(self.hash) {
@@ -186,7 +186,7 @@ where
                 } else {
                     assert!(false);
                 }
-            } else if current == V::null() {
+            } else if current.is_null() {
                 // Value has been erased, return None.
                 return None;
             } else {

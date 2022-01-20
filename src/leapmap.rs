@@ -396,7 +396,7 @@ where
                 ConcurrentInsertResult::Migration(retry_value) => {
                     // Another thread overflowed and started a migration.
                     value = retry_value;
-                    debug_assert!(value == retry_value);
+                    //debug_assert!(value == retry_value);
                     self.participate_in_migration();
                 }
             }
@@ -1545,8 +1545,8 @@ impl<K, V> Migrator<K, V> {
                                     Ordering::Relaxed,
                                     Ordering::Relaxed,
                                 ) {
-                                    Ok(old) => {
-                                        debug_assert!(old == src_value);
+                                    Ok(_old) => {
+                                        //debug_assert!(old == src_value);
                                         break;
                                     }
                                     Err(updated) => {

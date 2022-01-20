@@ -274,7 +274,7 @@ where
         Q: Hash + Eq,
     {
         self.find(make_hash::<K, Q, H>(&self.hash_builder, &key))
-            .map_or(None, |old| if *old == V::null() { None } else { Some(old) })
+            .map_or(None, |old| if old.is_null() { None } else { Some(old) })
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -300,7 +300,7 @@ where
         let buckets = table.bucket_slice_mut();
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
         Self::find_mut(buckets, hash, size_mask).map_or(None, |old| {
-            if *old == V::null() {
+            if old.is_null() {
                 None
             } else {
                 Some(old)
@@ -347,7 +347,7 @@ where
         // deleted, and the next time the map is resized they will be removed.
         if let Some(v) = self.get_mut(key) {
             let old_value = *v;
-            if old_value == V::null() {
+            if old_value.is_null() {
                 return None;
             }
             *v = V::null();
@@ -548,7 +548,7 @@ where
         let size_mask = self.get_table().size_mask;
         for _ in 0..Self::CELLS_IN_USE {
             let cell = Self::get_cell(buckets, index, size_mask);
-            if cell.value != V::default() {
+            if !cell.value.is_null() {
                 cells_in_use += 1;
             }
             index += 1;
@@ -593,7 +593,7 @@ where
 
         for source_index in 0..source_size {
             let cell = Self::get_cell(source_buckets, source_index, source_size_mask);
-            if cell.value != V::default() {
+            if !cell.value.is_null() {
                 match Self::insert_or_find(cell.hash, cell.value, dst_buckets, dst_size_mask) {
                     InsertResult::Overflow(_) => {
                         // New bucekts are too small, failed to move.

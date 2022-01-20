@@ -131,7 +131,7 @@ pub use leapref::Ref;
 pub use leapref::RefMut;
 
 /// Trait which represents a value which can be stored in a map.
-pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
+pub trait Value: Sized + Debug + Clone + Copy {
     /// Must return true if the value is the redirect value.
     fn is_redirect(&self) -> bool;
 
@@ -148,15 +148,19 @@ pub trait Value: Default + Debug + Sized + PartialEq + Clone + Copy {
 macro_rules! value_impl {
     ($type:ty, $redirect_expr:expr, $null_expr:expr) => {
         impl Value for $type {
+            #[inline]
             fn is_redirect(&self) -> bool {
                 *self == $redirect_expr
             }
+            #[inline]
             fn is_null(&self) -> bool {
                 *self == $null_expr
             }
+            #[inline]
             fn redirect() -> Self {
                 $redirect_expr
             }
+            #[inline]
             fn null() -> Self {
                 $null_expr
             }
