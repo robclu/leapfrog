@@ -304,7 +304,7 @@ where
     /// ```
     pub fn update(&self, key: K, value: V) -> Option<V> {
         let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
-        debug_assert!(value != V::null());
+        debug_assert!(!value.is_null());
 
         loop {
             match self.find(hash) {
@@ -351,7 +351,7 @@ where
     /// ```
     pub fn insert(&self, key: K, mut value: V) -> Option<V> {
         let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
-        debug_assert!(value != V::null());
+        debug_assert!(!value.is_null());
 
         loop {
             // We need to get the pointer to the buckets which we are going to
@@ -379,7 +379,7 @@ where
                         migrator.set_initialization_complete_flag();
                     } else {
                         // Try and clean up any old migration tables.
-                        migrator.cleanup_stale_table(&self.allocator);
+                        //migrator.cleanup_stale_table(&self.allocator);
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -425,7 +425,7 @@ where
                     break;
                 }
 
-                if cell.value.load(Ordering::Relaxed) != V::null() {
+                if !cell.value.load(Ordering::Relaxed).is_null() {
                     elements += 1;
                 }
 
@@ -441,14 +441,14 @@ where
         debug_assert!(hash != Self::null_hash());
 
         loop {
-            let table = self.get_table_mut(Ordering::Acquire);
+            let table = self.get_table(Ordering::Acquire);
             let size_mask = table.size_mask;
             let buckets = table.bucket_slice();
 
             if let Some(cell) = self.find_inner(hash, buckets, size_mask) {
                 let value = cell.value.load(Ordering::Acquire);
-                if value != V::redirect() {
-                    if value == V::null() {
+                if !value.is_redirect() {
+                    if value.is_null() {
                         return None;
                     }
                     return Some(cell);
@@ -518,7 +518,7 @@ where
             // If the cell was found, but the value is default, then it means
             // that this cell has already been erased, since the value
             // would have been set to default.
-            if value == V::null() {
+            if value.is_null() {
                 return None;
             }
 
@@ -536,7 +536,7 @@ where
                     // can treat this as if we erased the cell and then the new
                     // thread performed the write, which is what happened, we just
                     // didn't finish the erasure.
-                    if updated != V::redirect() {
+                    if !updated.is_redirect() {
                         return Some(value);
                     }
 
@@ -550,7 +550,7 @@ where
                                 cell = new_cell;
                                 // This should almost always be true, migration is finished.
                                 // Break and then search again with the new cell.
-                                if cell.value.load(Ordering::Relaxed) != V::redirect() {
+                                if !cell.value.load(Ordering::Relaxed).is_redirect() {
                                     break;
                                 }
                                 // Migration not finished, try again ..
@@ -584,7 +584,7 @@ where
         let mut cells_in_use = 0;
         for _ in 0..Self::CELLS_IN_USE {
             let cell = get_cell(src_buckets, index, size_mask);
-            if cell.value.load(Ordering::Relaxed) != V::null() {
+            if !cell.value.load(Ordering::Relaxed).is_null() {
                 cells_in_use += 1;
             }
             index += 1;
@@ -614,7 +614,26 @@ where
             .remaining_units
             .store(Self::remaining_units(size_mask), Ordering::Relaxed);
         migrator.overflowed.store(false, Ordering::Relaxed);
-        migrator.num_source_tables.store(1, Ordering::Relaxed);
+
+        // Check if there are any old source tables, and move them to the cleanup
+        // queue:
+        let last_source = migrator.last_stale_source.load(Ordering::Relaxed);
+        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed);
+        migrator.num_source_tables.store(0, Ordering::Relaxed);
+
+        for i in 0..num_sources {
+            let source = migrator.sources.pop().unwrap();
+            let index = migrator.stale_source_index((last_source + i) as usize);
+
+            // If this is not null, then we have wrapped:
+            debug_assert!(
+                migrator.stale_sources[index].load(Ordering::Relaxed) == std::ptr::null_mut()
+            );
+
+            migrator.stale_sources[index]
+                .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
+            migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
+        }
 
         let source = MigrationSource::<K, V> {
             table: AtomicPtr::new(src_table_ptr),
@@ -625,6 +644,7 @@ where
         } else {
             migrator.sources[0] = source;
         }
+        migrator.num_source_tables.store(1, Ordering::Relaxed);
     }
 
     /// Makes the calling thread participate in the migtration.
@@ -688,13 +708,18 @@ where
         let num_sources = migrator.num_source_tables.load(Ordering::Relaxed);
         for i in 0..num_sources {
             let mut finished = false;
-            let source = &migrator.sources[i as usize];
             loop {
                 if migrator.finishing() {
                     finished = true;
                     break;
                 }
 
+                // FIXME: This should not be here
+                if i as usize >= migrator.sources.len() {
+                    break;
+                }
+
+                let source = &migrator.sources[i as usize];
                 // Check if this source has finished migration and we can move on:
                 let start_index = source
                     .index
@@ -741,7 +766,7 @@ where
             // Clean up old migrated tables until finished. This also makes the
             // performance of inserts more stable.
             while migrator.status.load(Ordering::Relaxed) >= 1 {
-                migrator.cleanup_stale_table(allocator);
+                //migrator.cleanup_stale_table(allocator);
             }
 
             // We weren't the last thread here, so we can exit.
@@ -791,31 +816,15 @@ where
             dst_table.store(new_table_ptr, Ordering::Release);
 
             migrator.overflowed.store(false, Ordering::Relaxed);
-            migrator
-                .dst_table
-                .store(std::ptr::null_mut(), Ordering::Relaxed);
-
-            // FIXME: Move the source buckets into the cleanup queue:
-            let last_source = migrator.last_stale_source.load(Ordering::Relaxed);
             //migrator
-            //    .num_stale_sources
-            //    .fetch_add(num_sources, Ordering::Relaxed);
-            for i in 0..num_sources {
-                let source = migrator.sources.pop().unwrap();
-                let index = migrator.stale_source_index((last_source + i) as usize);
+            //    .dst_table
+            //    .store(std::ptr::null_mut(), Ordering::Relaxed);
 
-                // If this is not null, then we have wrapped:
-                debug_assert!(
-                    migrator.stale_sources[index].load(Ordering::Relaxed) == std::ptr::null_mut()
-                );
-
-                migrator.stale_sources[index]
-                    .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
-                migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
-            }
+            // We don't move the source tables here, rather, we wait until the
+            // next mogration and add them to the cleanup queue then.
 
             // Finally we can set that we are done!
-            migrator.status.store(0, Ordering::Relaxed);
+            migrator.status.store(0, Ordering::Release);
         }
     }
 
@@ -876,7 +885,7 @@ where
             let old_value = cell.value.load(Ordering::Acquire);
 
             // Check if the table is being moved:
-            if old_value == V::redirect() {
+            if old_value.is_redirect() {
                 return ConcurrentInsertResult::Migration(value);
             }
 
@@ -925,7 +934,7 @@ where
                     let old_value = cell.value.load(Ordering::Acquire);
 
                     // Check if the table is being moved:
-                    if old_value == V::redirect() {
+                    if old_value.is_redirect() {
                         return ConcurrentInsertResult::Migration(value);
                     }
 
@@ -1029,7 +1038,7 @@ where
 
         // Success: just return the old value, as the desired value is now stord.
         if exchange_result.is_ok() {
-            if old_value == V::null() {
+            if old_value.is_null() {
                 return ConcurrentInsertResult::NewInsert;
             } else {
                 return ConcurrentInsertResult::Replaced(old_value);
@@ -1038,7 +1047,7 @@ where
 
         // If the map is not being migrated, but we lost the race:
         let value = exchange_result.unwrap_err();
-        if value != V::redirect() {
+        if !value.is_redirect() {
             // There was a racing write or erasure to this cell. We can
             // treat this situation as if we just exchanged the value and
             // then the other thread did so just after, in which case our
@@ -1313,7 +1322,7 @@ impl<K, V> Migrator<K, V> {
     pub(super) const STATUS_MASK: usize = Self::MIGRATION_COMPLETE_FLAG | Self::INITIALIZATION_MASK;
 
     /// Number of stale source elements
-    const STALE_SOURCES: usize = 16;
+    const STALE_SOURCES: usize = 32;
     /// Mask for stale source index.
     const STALE_CAPACITY_MASK: usize = Self::STALE_SOURCES - 1;
 
@@ -1413,8 +1422,11 @@ impl<K, V> Migrator<K, V> {
             // Won the race, we can deallocate the stale source for our index:
             let index = self.stale_source_index(current as usize);
             let table_ptr = self.stale_sources[index].load(Ordering::Relaxed);
-            let table = unsafe { &mut *table_ptr };
+            if table_ptr.is_null() {
+                return;
+            }
 
+            let table = unsafe { &mut *table_ptr };
             let bucket_ptr = table.buckets;
             let bucket_count = table.size() >> 2;
             deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
@@ -1468,7 +1480,7 @@ impl<K, V> Migrator<K, V> {
                         Ok(_) => break,
                         Err(old) => {
                             // Either redirect has already been placed
-                            if old == V::redirect() {
+                            if old.is_redirect() {
                                 break;
                             }
                         }
@@ -1478,7 +1490,7 @@ impl<K, V> Migrator<K, V> {
                 } else {
                     // Check for deleted/uninitialized value ...
                     let mut src_value = cell.value.load(Ordering::Relaxed);
-                    if src_value == V::null() {
+                    if src_value.is_null() {
                         // Need to place a redirect as above:
                         match cell.value.compare_exchange(
                             src_value,
@@ -1488,7 +1500,7 @@ impl<K, V> Migrator<K, V> {
                         ) {
                             Ok(_) => break,
                             Err(old) => {
-                                if old == V::redirect() {
+                                if old.is_redirect() {
                                     // Should never happen, this would be a race to place
                                     // a redirect on the cell, each thread should be
                                     // working on its own migration unit.
@@ -1496,7 +1508,7 @@ impl<K, V> Migrator<K, V> {
                                 }
                             }
                         }
-                    } else if src_value == V::redirect() {
+                    } else if src_value.is_redirect() {
                         // Already marked redirect from previous migration
                         break;
                     }
