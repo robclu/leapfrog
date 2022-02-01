@@ -1,3 +1,6 @@
+[![version](https://img.shields.io/crates/v/leapfrog)](https://crates.io/crates/leapfrog)
+[![documentation](https://docs.rs/leapfrog/badge.svg)](https://docs.rs/leapfrog)
+
 # Leapfrog
 
 The leapfrog crate contains two HashMap implementations, `HashMap`, which is
