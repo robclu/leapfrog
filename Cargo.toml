@@ -6,10 +6,10 @@ authors = ["Rob Clucas <robjclucas@gmail.com>"]
 license = "MIT OR Apache-2.0"
 
 readme = "README.md"
-description = "Fast, lock-free concurrent hash map"
+description = "A fast, lock-free concurrent hash map"
 repository = "https://github.com/robclu/leapfrog"
 
-keywords = ["hashmap","concurrent","map"]
+keywords = ["hashmap","concurrent", "map"]
 categories = ["concurrency", "data-structures"]
 
 [profile.release]
