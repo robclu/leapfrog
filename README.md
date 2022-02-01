@@ -12,6 +12,7 @@ performance for most real-world use cases is around 2x the next fastest Rust
 hashmap, and around 13.6x `std::collections::HashMap` wrapped with RwLock for 16
 cores. It also scales better than other hash map implementations. Benchmark results 
 can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
+Pleas see the crate documentation for more details.
 
 **If the value type for the map supports atomic operations then this map will not 
 lock, while if the value type does not support atomic perations then accessing the 
