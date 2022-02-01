@@ -13,6 +13,10 @@ hashmap, and around 13.6x `std::collections::HashMap` wrapped with RwLock for 16
 cores. It also scales better than other hash map implementations. Benchmark results 
 can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
 
+**If the value type for the map supports atomic operations then this map will not 
+lock, while if the value type does not support atomic perations then accessing the 
+value uses an efficient spinlock implementation.**
+
 # Performance
 
 A snapshot of the results for the LeapMap on a read heavy workload using a 16 core 
