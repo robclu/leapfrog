@@ -12,11 +12,30 @@ performance for most real-world use cases is around 2x the next fastest Rust
 hashmap, and around 13.6x `std::collections::HashMap` wrapped with RwLock for 16
 cores. It also scales better than other hash map implementations. Benchmark results 
 can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
-Pleas see the crate documentation for more details.
+These bechmarks, however, are limited in the use cases that they cover, and likely
+should be extended to cover a much wider scope. Nevertheless, for those bechamarks,
+these maps are the fastest. Please see the crate documentation for more details,
+specifically the limtiations.
 
 **If the value type for the map supports atomic operations then this map will not 
 lock, while if the value type does not support atomic perations then accessing the 
 value uses an efficient spinlock implementation.**
+
+In their current form, while the API is similar to the `std` HashMap implementation,
+these maps are not drop-in replacements for the `HashMap`, `RwLock<HashMap>`, `DashMap`,
+etc.
+
+# Planned Extensions
+
+Based on feedback, not storing the keys introduces problems for many use cases. However,
+for the cases where such a limitation is acceptable for increased performance, I plan
+on keeping the `LeapMap` as is, and adding support for iterators, rayon, serde, and any 
+other requested features, as well as a `LeapSet`.
+
+I also plan on adding a map which uses the same probing strategy, but which does store
+keys. This wont be as fast as the `LeapMap`, but should be a drop-in replacement for
+other maps (with hopefully better performance). I will also add a `Set` version of that,
+with the same support as the mentioned above.
 
 # Performance
 
