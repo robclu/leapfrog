@@ -8,11 +8,11 @@ a single-threaded HashMap, and `LeapMap`, which is fast, lock-free concurrent
 version of the `HashMap`, where all operations can be performed concurrently 
 from any number of threads. **These hash map implementations are still in 
 development**, and have limitations which other hash maps do not have. Specifically,
-only hashes of the keys are stored *currently*, therefore when there is a collision 
+only hashes of the keys are stored in the current implementation, therefore when there is a collision 
 in the hash then that data will be overwritten. The probability of a collision depends
 on the hasher and the number of elements in the hash map, so the suitability of the
 hash maps in their current form is problem dependent. **They can only be used as a drop
-in replacement for rust's HashMap if is known that the hash will not produce a collision**.
+in replacement for Rust's HashMap if is known that the hash will not produce a collision**.
 The next version of the maps will remove this limitation.
 
 For such use cases, the performance for most real-world use cases is 
