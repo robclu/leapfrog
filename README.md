@@ -3,19 +3,27 @@
 
 # Leapfrog
 
-The leapfrog crate contains two HashMap implementations, `HashMap`, which is
-a single-threaded HashMap, which can be used as an alternative to rusts built
-in HashMap (with somewhat limited functionality but better performance), and 
-`LeapMap`, which is fast, lock-free concurrent version of the `HashMap`, where
-all operations can be used concurrently from any number of threads. The
-performance for most real-world use cases is around 2x the next fastest Rust
-hashmap, and around 13.6x `std::collections::HashMap` wrapped with RwLock for 16
+The leapfrog crate contains two hash map implementations, `HashMap`, which is
+a single-threaded HashMap, and `LeapMap`, which is fast, lock-free concurrent 
+version of the `HashMap`, where all operations can be performed concurrently 
+from any number of threads. **These hash map implementations are still in 
+development**, and have limitations which other hash maps do not have. Specifically,
+only hashes of the keys are stored *currently*, therefore when there is a collision 
+in the hash then that data will be overwritten. The probability of a collision depends
+on the hasher and the number of elements in the hash map, so the suitability of the
+hash maps in their current form is problem dependent. **They can only be used as a drop
+in replacement for rust's HashMap if is known that the hash will not produce a collision**.
+The next version of the maps will remove this limitation.
+
+For such use cases, the performance for most real-world use cases is 
+around 2x the next fastest Rust hash map implementation, and around 13.6x 
+`std::collections::HashMap` wrapped with RwLock for 16
 cores. It also scales better than other hash map implementations. Benchmark results 
 can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
-These bechmarks, however, are limited in the use cases that they cover, and likely
+These bechmarks, however, are limited in the use cases that they cover (the above
+mentioned limitations were not encountered when running any of these benchmarks), and 
 should be extended to cover a much wider scope. Nevertheless, for those bechamarks,
-these maps are the fastest. Please see the crate documentation for more details,
-specifically the limtiations.
+these maps are the fastest. Please see the crate documentation for more details.
 
 **If the value type for the map supports atomic operations then this map will not 
 lock, while if the value type does not support atomic perations then accessing the 
@@ -32,8 +40,9 @@ for the cases where such a limitation is acceptable for increased performance, I
 on keeping the `LeapMap` as is, and adding support for iterators, rayon, serde, and any 
 other requested features, as well as a `LeapSet`.
 
-I also plan on adding a map which uses the same probing strategy, but which does store
-keys. This wont be as fast as the `LeapMap`, but should be a drop-in replacement for
+I am currently working on adding a map which uses the same probing strategy, but which 
+does store keys and therefore doesn't have the presented limitations. This wont be as 
+fast as the `LeapMap`, but should be a drop-in replacement for
 other maps (with hopefully better performance). I will also add a `Set` version of that,
 with the same support as the mentioned above.
 
