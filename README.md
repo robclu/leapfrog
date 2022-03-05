@@ -5,7 +5,7 @@
 
 The leapfrog crate contains two HashMap implementations, `HashMap`, which is
 a single-threaded HashMap, which can be used as an alternative to rusts built
-in HashMap (without somewhat limited functionality but better performance), and 
+in HashMap (with somewhat limited functionality but better performance), and 
 `LeapMap`, which is fast, lock-free concurrent version of the `HashMap`, where
 all operations can be used concurrently from any number of threads. The
 performance for most real-world use cases is around 2x the next fastest Rust
