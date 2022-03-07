@@ -12,12 +12,16 @@ repository = "https://github.com/robclu/leapfrog"
 keywords = ["hashmap","concurrent", "map"]
 categories = ["concurrency", "data-structures"]
 
+[features]
+default = []
+
 [profile.release]
 debug = true
 lto = true
 
 [dependencies]
 atomic = "0.5.1"
+serde = { version = "1.0.136", features = ["derive"] }
 
 [dev-dependencies]
 rand = "0.8.4"
@@ -27,3 +31,6 @@ criterion = "0.3.5"
 [[bench]]
 name = "hashmap"
 harness = false
+
+#[package.metadata.docs.rs]
+#features = ["serde"]
