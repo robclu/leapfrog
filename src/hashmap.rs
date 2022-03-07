@@ -13,9 +13,14 @@ pub(crate) type HashedKey = u64;
 /// Struct which stores a cell in a hash map. A cell is simply a hash (rather
 /// than the key iteself) and the value associated with the key for which the
 /// hash is associated.
-struct Cell<V> {
-    /// The hashed value of the cell.
+struct Cell<K, V> {
+    /// The hashed value of the cell. This adds 8 bytes of overhead to per key-value
+    /// pair for the cell, which is a lot, but it improves performance, so we
+    /// make the tradeoff.
+    /// FIXME: Reduce this overhead ...
     hash: HashedKey,
+    // The key for the cell.
+    key: K,
     /// The value assosciated with the hash.
     value: V,
 }
@@ -57,7 +62,7 @@ struct Bucket<K, V> {
     /// values to the next probe in the chain, for each cell, respectively.
     deltas: [u8; 8],
     /// Cells for the bucket.
-    cells: [Cell<V>; 4],
+    cells: [Cell<K, V>; 4],
     /// Placeholder for the key
     _key: std::marker::PhantomData<K>,
 }
@@ -75,7 +80,7 @@ enum InsertResult<V> {
     Overflow(usize),
 }
 
-/// A HashMap implementation which uses a modified form of RobinHood/Hopscotch
+/// A [`HashMap`] implementation which uses a modified form of RobinHood/Hopscotch
 /// probing. This implementation is efficient, roughly 2x the performance of
 /// the default hash map *when using a the same fast hasher*, and a lot more
 /// when using the default hasher. It has also been benchmarked to be as fast/
@@ -227,14 +232,17 @@ where
     /// assert_eq!(map.insert(37, 12), None);
     /// assert_eq!(map.insert(37, 14), Some(12));
     /// ```
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V>
+    where
+        K: Copy,
+    {
         let mut state = self.hash_builder.build_hasher();
         key.hash(&mut state);
         let hash = state.finish();
         loop {
             let size_mask = self.get_table().size_mask;
             let buckets = self.get_table_mut().bucket_slice_mut();
-            match Self::insert_or_find(hash, value, buckets, size_mask) {
+            match Self::insert_or_find(hash, &key, value, buckets, size_mask) {
                 InsertResult::Overflow(overflow_index) => {
                     // Resize and move into a new map, then try again.
                     // If this happens on the first iteration, then deleted cells
@@ -273,8 +281,8 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        self.find(make_hash::<K, Q, H>(&self.hash_builder, &key))
-            .map_or(None, |old| if old.is_null() { None } else { Some(old) })
+        self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
+            .and_then(|(k, v)| if v.is_null() { None } else { Some(v) })
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -299,13 +307,35 @@ where
         let size_mask = table.size_mask;
         let buckets = table.bucket_slice_mut();
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        Self::find_mut(buckets, hash, size_mask).map_or(None, |old| {
+        Self::find_mut(buckets, hash, key, size_mask).and_then(|old| {
             if old.is_null() {
                 None
             } else {
                 Some(old)
             }
         })
+    }
+
+    /// Returns the key-value pair corresponding to the supplied key.
+    ///
+    /// The supplied key may be any borrower form of the map's key type, but
+    /// [`Hash`] and [`Eq`] on the borrowed form *must* match those for the key
+    /// type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut map = leapfrog::HashMap::new();
+    /// map.insert(1, 12);
+    /// assert_eq!(map.get_key_value(&1), Some((&1, &12)));
+    /// assert!(map.get(&2).is_none());
+    /// ```
+    pub fn get_key_value<Q: ?Sized>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
     }
 
     /// Returns true if the map contains the specified `key`.
@@ -379,6 +409,11 @@ where
         self.size
     }
 
+    /// Returns `true` if the map contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Inserts a new cell into the given `buckets`, where the max number of
     /// buckets is `size_mask` + 1.
     ///
@@ -398,6 +433,7 @@ where
     /// with the index of the overflow.
     fn insert_or_find(
         hash: HashedKey,
+        key: &K,
         value: V,
         buckets: &mut [Bucket<K, V>],
         size_mask: usize,
@@ -405,11 +441,12 @@ where
         let mut index = hash as usize;
         {
             let cell = Self::get_cell_mut(buckets, index, size_mask);
-            if cell.hash == hash {
+            if cell.hash == hash && cell.key == *key {
                 let old_value = cell.value;
                 cell.value = value;
                 return InsertResult::Found(old_value);
             } else if cell.hash == Self::null_hash() {
+                cell.key = key.clone();
                 cell.hash = hash;
                 cell.value = value;
                 return InsertResult::NewInsert;
@@ -421,13 +458,13 @@ where
         // walk along the chain. At each point, we check if the hash is a match;
         // if we find a match, then we have found the cell.
         let mut delta = Self::get_first_delta(buckets, index, size_mask);
-        let first_delta = if delta == 0 { true } else { false };
+        let first_delta = delta == 0;
         while delta != 0 {
             index += delta as usize;
             delta = Self::get_second_delta(buckets, index, size_mask);
 
             let mut cell = Self::get_cell_mut(buckets, index, size_mask);
-            if cell.hash == hash {
+            if hash == cell.hash && cell.key == *key {
                 let old_value = cell.value;
                 cell.value = value;
                 return InsertResult::Found(old_value);
@@ -450,6 +487,7 @@ where
             let mut cell = Self::get_cell_mut(buckets, index, size_mask);
             if cell.hash == Self::null_hash() {
                 cell.hash = hash;
+                cell.key = key.clone();
                 cell.value = value;
 
                 let offset = (index - prev_link_index) as u8;
@@ -463,7 +501,7 @@ where
 
             // This is single threaded map, so it's impossible for the hash
             // which is a match to appear outside of the probe chain.
-            debug_assert!(cell.hash != hash);
+            debug_assert!(cell.key != *key);
             probes_remaining -= 1;
         }
 
@@ -474,7 +512,10 @@ where
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a Some(&v) if the find succeeded, otherwise this will
     /// return None.
-    fn find(&self, hash: HashedKey) -> Option<&V> {
+    fn find<Q: ?Sized + Eq>(&self, hash: HashedKey, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+    {
         debug_assert!(hash != Self::null_hash());
 
         let buckets = self.get_table().bucket_slice();
@@ -482,8 +523,8 @@ where
 
         let mut index = hash as usize;
         let cell = Self::get_cell(buckets, index, size_mask);
-        if cell.hash == hash {
-            return Some(&cell.value);
+        if cell.hash == hash && key.eq(cell.key.borrow()) {
+            return Some((&cell.key, &cell.value));
         }
 
         // Now we need to follow the probe chain for the bucket.
@@ -491,8 +532,8 @@ where
         while delta != 0 {
             index += delta as usize;
             let cell = Self::get_cell(buckets, index, size_mask);
-            if cell.hash == hash {
-                return Some(&cell.value);
+            if cell.hash == hash && key.eq(cell.key.borrow()) {
+                return Some((&cell.key, &cell.value));
             }
 
             delta = Self::get_second_delta(buckets, index, size_mask);
@@ -504,14 +545,23 @@ where
     /// Tries to find the value for the `hash` without inserting into the
     /// `buckets`. This will reuturn a reference to the old value if the find
     /// was successful.
-    fn find_mut(buckets: &mut [Bucket<K, V>], hash: HashedKey, size_mask: usize) -> Option<&mut V> {
+    fn find_mut<Q: ?Sized + Eq>(
+        buckets: &'a mut [Bucket<K, V>],
+        hash: HashedKey,
+        key: &Q,
+        size_mask: usize,
+    ) -> Option<&'a mut V>
+    where
+        K: Borrow<Q>,
+    {
         debug_assert!(hash != Self::null_hash());
 
         let mut index = hash as usize;
         let mut delta = 0u8;
         let mut found = false;
 
-        if Self::get_cell(buckets, index, size_mask).hash == hash {
+        let cell = Self::get_cell(buckets, index, size_mask);
+        if cell.hash == hash && key.eq(cell.key.borrow()) {
             found = true;
         } else {
             delta = Self::get_first_delta(buckets, index, size_mask);
@@ -522,7 +572,8 @@ where
         // something
         while !found && delta != 0 {
             index += delta as usize;
-            if Self::get_cell(buckets, index, size_mask).hash == hash {
+            let cell = Self::get_cell(buckets, index, size_mask);
+            if cell.hash == hash && key.eq(cell.key.borrow()) {
                 found = true;
                 break;
             }
@@ -594,7 +645,13 @@ where
         for source_index in 0..source_size {
             let cell = Self::get_cell(source_buckets, source_index, source_size_mask);
             if !cell.value.is_null() {
-                match Self::insert_or_find(cell.hash, cell.value, dst_buckets, dst_size_mask) {
+                match Self::insert_or_find(
+                    cell.hash,
+                    &cell.key,
+                    cell.value,
+                    dst_buckets,
+                    dst_size_mask,
+                ) {
                     InsertResult::Overflow(_) => {
                         // New bucekts are too small, failed to move.
                         Self::deallocate_table(&self.allocator, dst_table_ptr);
@@ -624,7 +681,7 @@ where
         assert!(cells >= 4 && (cells % 2 == 0));
         let bucket_count = cells >> 2;
         let bucket_ptr =
-            allocate::<Bucket<K, V>, A>(&allocator, bucket_count, AllocationKind::Uninitialized);
+            allocate::<Bucket<K, V>, A>(allocator, bucket_count, AllocationKind::Uninitialized);
         let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
@@ -636,6 +693,7 @@ where
             };
 
             for cell in 0..4 {
+                // FIXME: How to initialize keys?
                 unsafe {
                     let cell_hash = &mut buckets[i].cells[cell].hash as *mut HashedKey;
                     std::ptr::write_bytes(cell_hash, 0, 1);
@@ -647,7 +705,7 @@ where
             }
         }
 
-        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1, AllocationKind::Uninitialized);
+        let table_ptr = allocate::<Table<K, V>, A>(allocator, 1, AllocationKind::Uninitialized);
         let table = unsafe { &mut *table_ptr };
 
         table.buckets = bucket_ptr;
@@ -667,7 +725,7 @@ where
 
     /// Gets a reference to a cell for the `index` from the `buckets`.
     #[inline]
-    fn get_cell(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &Cell<V> {
+    fn get_cell(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &Cell<K, V> {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         &buckets[bucket_index].cells[cell_index]
@@ -676,7 +734,11 @@ where
     /// Gets a mutable reference mutable to a cell for the `index` from the
     /// `buckets`.
     #[inline]
-    fn get_cell_mut(buckets: &mut [Bucket<K, V>], index: usize, size_mask: usize) -> &mut Cell<V> {
+    fn get_cell_mut(
+        buckets: &mut [Bucket<K, V>],
+        index: usize,
+        size_mask: usize,
+    ) -> &mut Cell<K, V> {
         let bucket_index = Self::get_bucket_index(index, size_mask);
         let cell_index = Self::get_cell_index(index);
         &mut buckets[bucket_index].cells[cell_index]
@@ -739,7 +801,7 @@ where
     /// Returns the null hash value.
     #[inline]
     const fn null_hash() -> HashedKey {
-        0 as HashedKey
+        0_u64
     }
 }
 

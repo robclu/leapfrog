@@ -18,15 +18,15 @@
 //!
 //! The biggest differences between the interface of this map and the
 //! `std::collections::HashMap`, is the types returned by (LeapMap::get) and
-//! [LeapMap::get_mut]. These methods return [Ref] and [RefMut] types,
+//! [LeapMap::get_mut]. These methods return [`Ref`] and [`RefMut`] types,
 //! respectively, which have interfaces to allow for accessing the cells returned
 //! by the get calls, concurrently and correctly. As a result, it is not possible
 //! to get a reference to the cell's value, since the cell value type is atomic.
-//! The value can be accessed with `value()` for [Ref] and [RefMut] types, or
-//! can be set with `set_value()`, or updated with `update`, for [RefMut] types.
+//! The value can be accessed with `value()` for [`Ref`] and [`RefMut`] types, or
+//! can be set with `set_value()`, or updated with `update`, for [`RefMut`] types.
 //! These interfaces ensure that the most up to date value is loaded/stored/updated,
 //! and that if the referenced cell is invalidated or erased by other threads,
-//! the reference [Ref]/[RefMut] type is updated appropriately. These interfaces
+//! the reference [`Ref`]/[`RefMut`] type is updated appropriately. These interfaces
 //! are designed to ensure that using the map does not require thinking about
 //! concurrency.
 //!
@@ -37,8 +37,13 @@
 //! around the cell to which a key hashes. This makes the map operations are cache
 //! friendly and scalable, even under heavy contention.
 //!
-//! This crate also provides [HashMap], which is an efficient single-threaded
-//! version of the concurrent lock-free hash map.
+//! This crate also provides [`HashMap`], which is an efficient single-threaded
+//! version of the concurrent lock-free hash map, whose performance is roughly
+//! 1.2-1.5x the hash map implementation in the standard library, when using *the
+//! same* hash function. The tradeoff that is currently made to enable this performance
+//! is increased memory. The hash map implementation in the standard library has
+//! 1 byte of overhead per key-value pair, while this [`HashMap`] implementation
+//! has 8 bytes.
 //!
 //! # Performance
 //!
@@ -56,7 +61,7 @@
 //! | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
 //! | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
 //!
-//! Where [LeapMap] is performance limited is when rapidly growing the map, since
+//! Where [`LeapMap`] is performance limited is when rapidly growing the map, since
 //! the bottleneck then becomes the resizing and migration operations. The map
 //! *is not* designed to be resized often (resizing infrequently has very little
 //! impact on performance), so it's best to use an initial capacity which is close
@@ -81,7 +86,7 @@
 //! *You should use a hasher which produces unique hashes for each key*. As only
 //! hashes are stored, if two keys hash to the same hash then the value for the
 //! keys which hash to the same value my be overwritten by each other. The
-//! [MurmurHasher] is the default hasher, and has been found to be efficient
+//! [`MurmurHasher`] is the default hasher, and has been found to be efficient
 //! and passed all stress tests. The built in hasher and
 //! [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
 //! stress tests. These hashers are not DOS resistant, so if that is required
@@ -100,12 +105,13 @@
 //!
 //! The size of the map must always be a power of two.
 //!
-//! The value type for the map needs to implement the [Value] trait, which is
+//! The value type for the map needs to implement the [`Value`] trait, which is
 //! simple enough to implement, however, two values need to be chosen, one as a
 //! null value and another as a redirect value. For integer types, MAX and MAX-1
 //! are used respectively. A good choice should be values which are efficient for
-//! comparison, so for strings, a single character which not be used as the first
-//! character for any valid string would be a good choice.
+//! comparison, so for strings, a single character which will not be used as the
+//! first character for any valid string would be a good choice (i.e a single number
+//! or special character when the strings won't begin with those).
 //!
 //! # Resizing
 //!
@@ -200,14 +206,8 @@ where
 }
 
 /// Implementation of a hasher which hashes using murmur.
+#[derive(Default)]
 pub struct MurmurHasher(u64);
-
-impl Default for MurmurHasher {
-    #[inline]
-    fn default() -> MurmurHasher {
-        MurmurHasher(0)
-    }
-}
 
 impl Hasher for MurmurHasher {
     #[inline]
@@ -258,14 +258,8 @@ impl Hasher for FnvHasher {
 
 // This is not really a hasher, it just returns the value to be hashed, however,
 // if it's known that the key is unique, it might be useful in such a scenario.
+#[derive(Default)]
 pub struct SimpleHasher(u64);
-
-impl Default for SimpleHasher {
-    #[inline]
-    fn default() -> SimpleHasher {
-        SimpleHasher(0)
-    }
-}
 
 impl Hasher for SimpleHasher {
     #[inline]

@@ -6,7 +6,9 @@ use rand::{thread_rng, Rng};
 use std::hash::BuildHasherDefault;
 
 const NUM_KEYS: usize = 1 << 14;
-const NUM_OPS: u64 = 50_000_000;
+const NUM_OPS: u64 = 10_000_000;
+
+type HashFn = std::collections::hash_map::DefaultHasher;
 
 fn bench_leapfrog_hashmap(c: &mut Criterion) {
     let mut group = c.benchmark_group("leapfrog_hashmap");
@@ -15,7 +17,7 @@ fn bench_leapfrog_hashmap(c: &mut Criterion) {
     group.bench_function("insert_and_remove", |b| {
         let mut map = leapfrog::HashMap::with_capacity_and_hasher(
             NUM_KEYS,
-            BuildHasherDefault::<MurmurHasher>::default(),
+            BuildHasherDefault::<HashFn>::default(),
         );
 
         let mut rng = thread_rng();
@@ -48,7 +50,7 @@ fn bench_std_hashmap(c: &mut Criterion) {
     group.bench_function("insert_and_remove", |b| {
         let mut map = std::collections::HashMap::with_capacity_and_hasher(
             NUM_KEYS,
-            BuildHasherDefault::<MurmurHasher>::default(),
+            BuildHasherDefault::<HashFn>::default(),
         );
 
         let mut rng = thread_rng();
@@ -81,7 +83,7 @@ fn bench_std_hashmap_rwlock(c: &mut Criterion) {
     group.bench_function("insert_and_remove", |b| {
         let map = std::sync::RwLock::new(std::collections::HashMap::with_capacity_and_hasher(
             NUM_KEYS,
-            BuildHasherDefault::<MurmurHasher>::default(),
+            BuildHasherDefault::<HashFn>::default(),
         ));
 
         let mut rng = thread_rng();

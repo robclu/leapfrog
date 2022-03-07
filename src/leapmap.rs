@@ -219,8 +219,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash)
-            .map_or(None, |cell| Some(Ref::new(self, cell, hash)))
+        self.find(hash).map(|cell| Ref::new(self, cell, hash))
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -246,8 +245,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash)
-            .map_or(None, |cell| Some(RefMut::new(self, cell, hash)))
+        self.find(hash).map(|cell| RefMut::new(self, cell, hash))
     }
 
     /// Returns true if the map contains the specified `key`.
@@ -285,7 +283,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash).map_or(None, |cell| self.erase_value(cell))
+        self.find(hash).and_then(|cell| self.erase_value(cell))
     }
 
     /// Updates a key-value pair.
@@ -368,11 +366,11 @@ where
                     // Try and create the table migration. Only a single thread
                     // should do this. Any threads which don't get the flag should
                     // start cleaning up old tables which have not been deallocated.
-                    let mut migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
+                    let migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
                     if migrator.set_initialization_begin_flag() {
                         Self::initialize_migrator(
                             &self.allocator,
-                            &mut migrator,
+                            migrator,
                             &self.table,
                             overflow_index,
                         );
@@ -435,6 +433,11 @@ where
         elements
     }
 
+    /// Returns `true` if the map contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a reference to the cell if the find succeeded.
     pub(crate) fn find(&self, hash: HashedKey) -> Option<&'a AtomicCell<V>> {
@@ -477,7 +480,7 @@ where
         let cell = get_cell(buckets, index, size_mask);
         let probe_hash = cell.hash.load(Ordering::Relaxed);
         if hash == probe_hash {
-            return Some(&cell);
+            return Some(cell);
         } else if probe_hash == Self::null_hash() {
             return None;
         }
@@ -493,7 +496,7 @@ where
             //       causes probe_hash to be default, but we don't need to check
             //       for that case, and we can just follow the probe chain.
             if probe_hash == hash {
-                return Some(&cell);
+                return Some(cell);
             }
 
             delta = get_second_delta(buckets, index, size_mask).load(Ordering::Relaxed);
@@ -600,7 +603,7 @@ where
         let new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
 
         // Migrator initialization:
-        let dst_table_ptr = Self::allocate_and_init_table(&allocator, new_table_size);
+        let dst_table_ptr = Self::allocate_and_init_table(allocator, new_table_size);
         let dst_table = unsafe { &*dst_table_ptr };
         debug_assert!(dst_table.size_mask != 0);
         migrator.dst_table.store(dst_table_ptr, Ordering::Relaxed);
@@ -626,9 +629,10 @@ where
             let index = migrator.stale_source_index((last_source + i) as usize);
 
             // If this is not null, then we have wrapped:
-            debug_assert!(
-                migrator.stale_sources[index].load(Ordering::Relaxed) == std::ptr::null_mut()
-            );
+            // FIXME: Fix this error ...
+            debug_assert!(migrator.stale_sources[index]
+                .load(Ordering::Relaxed)
+                .is_null());
 
             migrator.stale_sources[index]
                 .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -639,7 +643,7 @@ where
             table: AtomicPtr::new(src_table_ptr),
             index: AtomicUsize::new(0),
         };
-        if migrator.sources.len() < 1 {
+        if migrator.sources.is_empty() {
             migrator.sources.push(source);
         } else {
             migrator.sources[0] = source;
@@ -802,7 +806,7 @@ where
 
             // Create the new table for the migrator:
             let new_dst_table_ptr =
-                Self::allocate_and_init_table(&allocator, (table.size_mask + 1) * 2);
+                Self::allocate_and_init_table(allocator, (table.size_mask + 1) * 2);
             migrator
                 .dst_table
                 .store(new_dst_table_ptr, Ordering::Relaxed);
@@ -1069,7 +1073,7 @@ where
         assert!(cells >= 4 && (cells % 2 == 0));
         let bucket_count = cells >> 2;
         let bucket_ptr =
-            allocate::<Bucket<K, V>, A>(&allocator, bucket_count, AllocationKind::Uninitialized);
+            allocate::<Bucket<K, V>, A>(allocator, bucket_count, AllocationKind::Uninitialized);
         let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
@@ -1092,7 +1096,7 @@ where
             }
         }
 
-        let table_ptr = allocate::<Table<K, V>, A>(&allocator, 1, AllocationKind::Uninitialized);
+        let table_ptr = allocate::<Table<K, V>, A>(allocator, 1, AllocationKind::Uninitialized);
         let table = unsafe { &mut *table_ptr };
 
         table.buckets = bucket_ptr;
@@ -1104,7 +1108,7 @@ where
     /// Returns the null hash value.
     #[inline]
     const fn null_hash() -> HashedKey {
-        0 as HashedKey
+        0u64
     }
 
     /// Calculates the number of remaining migration units for the `size_mask`.
@@ -1352,11 +1356,7 @@ impl<K, V> Migrator<K, V> {
         let old = self
             .status
             .fetch_or(Self::INITIALIZATION_START_FLAG, Ordering::Relaxed);
-        if old & Self::INITIALIZATION_START_FLAG == 0 {
-            true // We set the flag
-        } else {
-            false
-        }
+        old & Self::INITIALIZATION_START_FLAG == 0
     }
 
     /// Sets the flag which indicates that the initialization process is complete.
@@ -1366,11 +1366,7 @@ impl<K, V> Migrator<K, V> {
         let old = self
             .status
             .fetch_or(Self::INITIALIZATION_END_FLAG, Ordering::Relaxed);
-        if old & Self::INITIALIZATION_END_FLAG == 0 {
-            true // We set the flag
-        } else {
-            false
-        }
+        old & Self::INITIALIZATION_END_FLAG == 0
     }
 
     /// If the migrator has completed/is completing the migration.
@@ -1559,10 +1555,13 @@ impl<K, V> Migrator<K, V> {
                             }
                         }
                     }
+
+                    // Migrated the cell, proceed to next cell:
+                    break;
                 }
 
                 // Migrated the cell, proceed to next cell:
-                break;
+                //break;
             }
         }
 
