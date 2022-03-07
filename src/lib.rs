@@ -1,5 +1,13 @@
 //! A lock-free concurrent hash table which uses leapfrog probing.
 //!
+//! As described below, the implementations of these maps do not store the keys
+//! but rather hashes of the keys. While this provides good performance, if there
+//! is a hash collision (different keys produce the same hash) then inserting
+//! with one key will replace the data of the other key (which should not happen).
+//! Therefore, in their current form, these are only usable as replacements for
+//! other hash map implementations *if the described behaviour is acceptable or
+//! if it is known that the hash function does not produce collisions*.
+//!
 //! All map operations can be used fuilly concurrently, and is both efficient
 //! and scalable up to many threads. If the value type for the map supports atomic
 //! operations then this map will not lock, while if the value type does not support atomic
@@ -38,7 +46,8 @@
 //! and multiple workloads. The benchmarks can be found [here](https://github.com/robclu/conc-map-bench).
 //! A snapshot of the results for a read heavy workload are the following (with
 //! throughput in Mops/second, cores in brackets, and performance realtive to
-//! `std::collections::HashMap` with RwLock):
+//! `std::collections::HashMap` with RwLock). While these benchmarks show good
+//! performance, *please take note of the limitations described above*.
 //!
 //! | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
 //! |------------------|----------------|--------------|-----------------|---------------|
@@ -67,16 +76,16 @@
 //! well.
 //!
 //! The primary limitation of the map is that it does not store keys, but rather
-//! hashes of the keys. Thus far this has not been a limitation, however, it would
-//! be possible to add key support, if neccessary.
+//! hashes of the keys. See the
 //!
-//! You should use a hasher which produces unique hashes for each key. As only
+//! *You should use a hasher which produces unique hashes for each key*. As only
 //! hashes are stored, if two keys hash to the same hash then the value for the
-//! keys which hash to the same value my be overwritten by each other if they
-//! are inserted concurrently. The [MurmurHasher] is the default hasher, and has
-//! been found to be efficient and passed all stress tests. The built in hasher
-//! and [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
-//! stress tests.
+//! keys which hash to the same value my be overwritten by each other. The
+//! [MurmurHasher] is the default hasher, and has been found to be efficient
+//! and passed all stress tests. The built in hasher and
+//! [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
+//! stress tests. These hashers are not DOS resistant, so if that is required
+//! then it's best to use the default hasher from the standard library.
 //!
 //! See the first section for limitations relating to the types returned by
 //! [LeapMap::get] and [LeapMap::get_mut].
