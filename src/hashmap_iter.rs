@@ -174,3 +174,81 @@ where
     A: Allocator + Sync + 'a,
 {
 }
+
+/// Iterator over a [`HashMap`] which yields mutable key-value reference pairs.
+///
+/// # Examples
+///
+/// ```
+/// use leapfrog::HashMap;
+///
+/// let mut map = HashMap::new();
+///
+/// map.insert(12, 17);
+/// map.insert(42, 23);
+///
+/// assert_eq!(map.iter().count(), 2);
+/// ```
+pub struct IterMut<'a, K, V, H: BuildHasher, A: Allocator> {
+    map: &'a mut HashMap<K, V, H, A>,
+    current: usize,
+}
+
+impl<'a, K, V, H, A> IterMut<'a, K, V, H, A>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+    H: BuildHasher + 'a,
+    A: Allocator + 'a,
+{
+    pub(crate) fn new(map: &'a mut HashMap<K, V, H, A>) -> Self {
+        Self {
+            map,
+            current: 0usize,
+        }
+    }
+}
+
+impl<'a, K, V, H, A> Iterator for IterMut<'a, K, V, H, A>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+    H: BuildHasher + Default + 'a,
+    A: Allocator + 'a,
+{
+    type Item = (&'a K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let current = self.current;
+            if let Some(cell) = self.map.get_cell_at_index_mut(current) {
+                self.current = current + 1;
+                if cell.is_empty() {
+                    continue;
+                }
+
+                return Some((&cell.key, &mut cell.value));
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+unsafe impl<'a, K, V, H, A> Send for IterMut<'a, K, V, H, A>
+where
+    K: Send,
+    V: Send,
+    H: BuildHasher + Send + 'a,
+    A: Allocator + Send + 'a,
+{
+}
+
+unsafe impl<'a, K, V, H, A> Sync for IterMut<'a, K, V, H, A>
+where
+    K: Sync,
+    V: Sync,
+    H: BuildHasher + Sync + 'a,
+    A: Allocator + Sync + 'a,
+{
+}

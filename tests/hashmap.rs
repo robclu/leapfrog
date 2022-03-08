@@ -143,3 +143,32 @@ fn hashmap_iter() {
 
     assert_eq!(count, KEYS);
 }
+
+#[test]
+fn hashmap_iter_mut() {
+    const KEYS: usize = 150;
+    let mut map = HashMap::new();
+    let kv_map = generate_kvs(KEYS);
+
+    for (k, v) in kv_map.iter() {
+        let val = *v;
+        let key = *k;
+        map.insert(key, val);
+    }
+
+    assert_eq!(map.len(), KEYS);
+
+    map.iter_mut().for_each(|(_k, v)| *v += 1);
+
+    let mut count = 0usize;
+    for (k, v) in map.iter() {
+        if let Some(val) = kv_map.get(k) {
+            assert_eq!(*v, *val + 1);
+        } else {
+            panic!("HashMap value is incorrect");
+        }
+        count += 1;
+    }
+
+    assert_eq!(count, KEYS);
+}

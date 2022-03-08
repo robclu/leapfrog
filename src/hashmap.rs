@@ -1,4 +1,4 @@
-use crate::hashmap_iter::{Iter, OwnedIter};
+use crate::hashmap_iter::{Iter, IterMut, OwnedIter};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
 use std::alloc::{Allocator, Global};
@@ -415,6 +415,24 @@ where
         Iter::new(self)
     }
 
+    /// Creates an iterator over a [`HashMap`] which yields mutable key-value
+    /// reference pairs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use leapfrog::HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert(12, 27);
+    /// map.iter_mut().for_each(|(_k, v)| *v += 1);
+    /// assert_eq!(map.get(&12), Some(&28));
+    /// assert_eq!(map.iter_mut().count(), 1);
+    /// ```
+    pub fn iter_mut(&'a mut self) -> IterMut<'a, K, V, H, A> {
+        IterMut::new(self)
+    }
+
     /// Returns the length of the map.
     ///
     /// # Examples
@@ -756,8 +774,19 @@ where
             return None;
         }
 
-        let buckets = self.get_table().bucket_slice();
+        let buckets = table.bucket_slice();
         Some(Self::get_cell(buckets, index, table.size_mask))
+    }
+
+    pub(crate) fn get_cell_at_index_mut(&self, index: usize) -> Option<&'a mut Cell<K, V>> {
+        let table = self.get_table_mut();
+        if index >= table.size() {
+            return None;
+        }
+
+        let size_mask = table.size_mask;
+        let buckets = table.bucket_slice_mut();
+        Some(Self::get_cell_mut(buckets, index, size_mask))
     }
 
     /// Gets a reference to a cell for the `index` from the `buckets`.
