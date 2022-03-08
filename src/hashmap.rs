@@ -1,6 +1,8 @@
+use crate::hashmap_iter::OwnedIter;
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
 use std::alloc::{Allocator, Global};
+use std::ptr::null;
 use std::{
     borrow::Borrow,
     default::Default,
@@ -10,19 +12,29 @@ use std::{
 /// The type used for hashed keys.
 pub(crate) type HashedKey = u64;
 
+/// The default haser for the map.
+pub(crate) type DefaultHash = MurmurHasher;
+
 /// Struct which stores a cell in a hash map. A cell is simply a hash (rather
 /// than the key iteself) and the value associated with the key for which the
 /// hash is associated.
-struct Cell<K, V> {
+pub(crate) struct Cell<K, V> {
     /// The hashed value of the cell. This adds 8 bytes of overhead to per key-value
     /// pair for the cell, which is a lot, but it improves performance, so we
     /// make the tradeoff.
     /// FIXME: Reduce this overhead ...
     hash: HashedKey,
     // The key for the cell.
-    key: K,
+    pub(crate) key: K,
     /// The value assosciated with the hash.
-    value: V,
+    pub(crate) value: V,
+}
+
+impl<K, V> Cell<K, V> {
+    /// Returns true if the cell is empty.
+    pub fn is_empty(&self) -> bool {
+        self.hash == null_hash()
+    }
 }
 
 /// Underlying table for a [HashMap]. This stores a pointer to the buckets and
@@ -101,7 +113,7 @@ enum InsertResult<V> {
 ///
 /// This version is *not* thread-safe. [crate::LeapMap] is a thread-safe version of the
 /// map.
-pub struct HashMap<K, V, H = BuildHasherDefault<MurmurHasher>, A: Allocator = Global> {
+pub struct HashMap<K, V, H = BuildHasherDefault<DefaultHash>, A: Allocator = Global> {
     /// Table for the map.
     table: *mut Table<K, V>,
     /// The hasher for the map.
@@ -282,7 +294,7 @@ where
         Q: Hash + Eq,
     {
         self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
-            .and_then(|(k, v)| if v.is_null() { None } else { Some(v) })
+            .and_then(|(_k, v)| if v.is_null() { None } else { Some(v) })
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -445,7 +457,7 @@ where
                 let old_value = cell.value;
                 cell.value = value;
                 return InsertResult::Found(old_value);
-            } else if cell.hash == Self::null_hash() {
+            } else if cell.hash == null_hash() {
                 cell.key = key.clone();
                 cell.hash = hash;
                 cell.value = value;
@@ -485,7 +497,7 @@ where
             // We found an empty cell, so reserve it and link it
             // to the previous cell in the same bucket.
             let mut cell = Self::get_cell_mut(buckets, index, size_mask);
-            if cell.hash == Self::null_hash() {
+            if cell.hash == null_hash() {
                 cell.hash = hash;
                 cell.key = key.clone();
                 cell.value = value;
@@ -516,7 +528,7 @@ where
     where
         K: Borrow<Q>,
     {
-        debug_assert!(hash != Self::null_hash());
+        debug_assert!(hash != null_hash());
 
         let buckets = self.get_table().bucket_slice();
         let size_mask = self.get_table().size_mask;
@@ -554,7 +566,7 @@ where
     where
         K: Borrow<Q>,
     {
-        debug_assert!(hash != Self::null_hash());
+        debug_assert!(hash != null_hash());
 
         let mut index = hash as usize;
         let mut delta = 0u8;
@@ -723,6 +735,16 @@ where
         deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
     }
 
+    pub(crate) fn get_cell_at_index(&self, index: usize) -> Option<&Cell<K, V>> {
+        let table = self.get_table();
+        if index >= table.size() {
+            return None;
+        }
+
+        let buckets = self.get_table().bucket_slice();
+        Some(Self::get_cell(buckets, index, table.size_mask))
+    }
+
     /// Gets a reference to a cell for the `index` from the `buckets`.
     #[inline]
     fn get_cell(buckets: &[Bucket<K, V>], index: usize, size_mask: usize) -> &Cell<K, V> {
@@ -797,12 +819,15 @@ where
     const fn get_cell_index(index: usize) -> usize {
         index & 3
     }
+}
 
-    /// Returns the null hash value.
-    #[inline]
-    const fn null_hash() -> HashedKey {
-        0_u64
-    }
+// This is safe to be send if the hasher and allocator are send, since the pointer
+// to the table is not thread-local and can be sent between threads.
+unsafe impl<K, V, H, A> Send for HashMap<K, V, H, A>
+where
+    H: BuildHasher + Send,
+    A: Allocator + Send,
+{
 }
 
 impl<K, V, H, A: Allocator> Drop for HashMap<K, V, H, A> {
@@ -816,4 +841,25 @@ impl<K, V, H, A: Allocator> Drop for HashMap<K, V, H, A> {
         let table_ptr = self.table;
         deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
     }
+}
+
+impl<K, V, H, A> IntoIterator for HashMap<K, V, H, A>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+    H: BuildHasher + Default,
+    A: Allocator,
+{
+    type Item = (K, V);
+    type IntoIter = OwnedIter<K, V, H, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OwnedIter::new(self)
+    }
+}
+
+/// Returns the null hash value.
+#[inline]
+pub(crate) const fn null_hash() -> HashedKey {
+    0_u64
 }

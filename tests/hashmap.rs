@@ -1,5 +1,6 @@
 use leapfrog::hashmap::*;
 use rand::{thread_rng, Rng};
+use std::collections::BTreeMap;
 
 const KEYS_TO_INSERT: usize = 2048;
 
@@ -67,4 +68,51 @@ fn hash_map_key_insert() {
 
     assert_eq!(insert_checksum, remove_checksum);
     assert_eq!(inserted, removed);
+}
+
+fn generate_kvs(keys: usize) -> BTreeMap<u64, u64> {
+    let mut map = BTreeMap::new();
+
+    let mut rng = thread_rng();
+    let start_index: u32 = rng.gen();
+    let value: u32 = rng.gen();
+    let relative_prime: u64 = value as u64 * 2 + 1;
+
+    let mut index = start_index;
+    for _ in 0..keys {
+        let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
+        key = key ^ (key >> 16);
+        map.insert(key, key + 1);
+
+        index += 1;
+    }
+
+    map
+}
+
+#[test]
+fn iter_kvs_correct_with_count() {
+    const KEYS: usize = 150;
+    let mut map = HashMap::new();
+    let kv_map = generate_kvs(KEYS);
+
+    for (k, v) in kv_map.iter() {
+        let val = *v;
+        let key = *k;
+        map.insert(key, val);
+    }
+
+    assert_eq!(map.len(), KEYS);
+
+    let mut count = 0usize;
+    for (k, v) in map.into_iter() {
+        if let Some(val) = kv_map.get(&k) {
+            assert_eq!(v, *val);
+        } else {
+            panic!("HashMap value is incorrect");
+        }
+        count += 1;
+    }
+
+    assert_eq!(count, KEYS);
 }

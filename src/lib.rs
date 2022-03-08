@@ -128,6 +128,7 @@
 #![feature(const_fn_trait_bound)]
 
 pub mod hashmap;
+mod hashmap_iter;
 pub mod leapmap;
 pub mod leapref;
 pub mod util;
