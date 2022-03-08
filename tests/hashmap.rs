@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 const KEYS_TO_INSERT: usize = 2048;
 
 #[test]
-fn create_hash_map() {
+fn hashmap_creation() {
     const ELEMENTS: usize = 8;
     let map = HashMap::<u32, u32>::with_capacity(ELEMENTS);
 
@@ -13,7 +13,7 @@ fn create_hash_map() {
 }
 
 #[test]
-fn hash_map_key_insert() {
+fn hashmap_insert() {
     let mut map = HashMap::<u64, u64>::with_capacity(KEYS_TO_INSERT);
 
     let mut rng = thread_rng();
@@ -32,7 +32,7 @@ fn hash_map_key_insert() {
         if key >= 2 {
             // Map is empty, we should only have None here:
             if let Some(_old) = map.insert(key, key) {
-                assert!(false);
+                panic!("HashMap value found which should not be present");
             }
             inserted += 1;
             insert_checksum = insert_checksum.wrapping_add(key);
@@ -91,7 +91,7 @@ fn generate_kvs(keys: usize) -> BTreeMap<u64, u64> {
 }
 
 #[test]
-fn iter_kvs_correct_with_count() {
+fn hashmap_into_iter() {
     const KEYS: usize = 150;
     let mut map = HashMap::new();
     let kv_map = generate_kvs(KEYS);
@@ -108,6 +108,33 @@ fn iter_kvs_correct_with_count() {
     for (k, v) in map.into_iter() {
         if let Some(val) = kv_map.get(&k) {
             assert_eq!(v, *val);
+        } else {
+            panic!("HashMap value is incorrect");
+        }
+        count += 1;
+    }
+
+    assert_eq!(count, KEYS);
+}
+
+#[test]
+fn hashmap_iter() {
+    const KEYS: usize = 150;
+    let mut map = HashMap::new();
+    let kv_map = generate_kvs(KEYS);
+
+    for (k, v) in kv_map.iter() {
+        let val = *v;
+        let key = *k;
+        map.insert(key, val);
+    }
+
+    assert_eq!(map.len(), KEYS);
+
+    let mut count = 0usize;
+    for (k, v) in map.iter() {
+        if let Some(val) = kv_map.get(k) {
+            assert_eq!(*v, *val);
         } else {
             panic!("HashMap value is incorrect");
         }

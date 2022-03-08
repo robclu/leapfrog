@@ -1,8 +1,7 @@
-use crate::hashmap_iter::OwnedIter;
+use crate::hashmap_iter::{Iter, OwnedIter};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
 use std::alloc::{Allocator, Global};
-use std::ptr::null;
 use std::{
     borrow::Borrow,
     default::Default,
@@ -398,6 +397,22 @@ where
         } else {
             None
         }
+    }
+
+    /// Creates an iterator over a [`HashMap`] which yields immutable key-value
+    /// reference pairs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use leapfrog::HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert(12, 27);
+    /// assert_eq!(map.iter().count(), 1);
+    /// ```
+    pub fn iter(&'a self) -> Iter<'a, K, V, H, A> {
+        Iter::new(self)
     }
 
     /// Returns the length of the map.
@@ -855,6 +870,21 @@ where
 
     fn into_iter(self) -> Self::IntoIter {
         OwnedIter::new(self)
+    }
+}
+
+impl<'a, K, V, H, A> IntoIterator for &'a HashMap<K, V, H, A>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+    H: BuildHasher + Default + 'a,
+    A: Allocator + 'a,
+{
+    type Item = (&'a K, &'a V);
+    type IntoIter = Iter<'a, K, V, H, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
