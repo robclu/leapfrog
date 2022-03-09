@@ -252,9 +252,6 @@ where
         let mut state = self.hash_builder.build_hasher();
         key.hash(&mut state);
         let hash = state.finish();
-        if hash == null_hash() {
-            println!("{:?} {}", key, hash);
-        }
         debug_assert!(hash != null_hash());
         loop {
             let size_mask = self.get_table().size_mask;
