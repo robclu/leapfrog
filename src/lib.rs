@@ -34,16 +34,27 @@
 //! which is similar to [hopscotch hashing](https://en.wikipedia.org/wiki/Hopscotch_hashing)
 //! since it is based off of it. Leapfrog probing stores two offset per
 //! cell which are used to efficiently traverse a local neighbourhood of values
-//! around the cell to which a key hashes. This makes the map operations are cache
+//! around the cell to which a key hashes. This makes the map operations cache
 //! friendly and scalable, even under heavy contention.
+//!
+//! # HashMap
 //!
 //! This crate also provides [`HashMap`], which is an efficient single-threaded
 //! version of the concurrent lock-free hash map, whose performance is roughly
 //! 1.2-1.5x the hash map implementation in the standard library, when using *the
-//! same* hash function. The tradeoff that is currently made to enable this performance
-//! is increased memory. The hash map implementation in the standard library has
-//! 1 byte of overhead per key-value pair, while this [`HashMap`] implementation
-//! has 8 bytes.
+//! same* hash function as the default hash function in the standard library.
+//! The tradeoff that is currently made to enable this performance is increased
+//! memory use, since the map stores the offsets (8 bytes) and the hashed value
+//! for a key (8 bytes). This may make the map unsuitable for some use cases.
+//!
+//! # Hash Functions
+//!
+//! By default, the default hash function from the standard library is used, which
+//! is DOS resistant, but is more expensive to evaluate. The [`MurmurHasher`] can
+//! be used instead, which is quite a bit faster but which is *not* DOS resistant.
+//! Additionally, the default initialization of the [`HashMap`] data requires that
+//! 0 not be used as a key for the map *if the [`MurmurHasher`] is used*. With the
+//! default hasher this limitation does not apply.
 //!
 //! # Performance
 //!
@@ -71,9 +82,8 @@
 //!
 //! # Consistency
 //!
-//! All operations on the map are non-blocking, and accessing/updating a value
-//! in the map will not lock if the value type has built-in atomic support. All
-//! operations can therefore be overlapped from any number of threads.
+//! All operations on a [`LeapMap`] map are non-blocking, and accessing/updating
+//! a value in the map will not lock *if the value type has built-in atomic support*.
 //!
 //! # Limitations
 //!
@@ -90,10 +100,11 @@
 //! and passed all stress tests. The built in hasher and
 //! [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
 //! stress tests. These hashers are not DOS resistant, so if that is required
-//! then it's best to use the default hasher from the standard library.
+//! then it's best to use the default hasher from the standard library. *This
+//! currently only applied to the [`LeapMap`], not the [`HashMap`]*.
 //!
 //! See the first section for limitations relating to the types returned by
-//! [LeapMap::get] and [LeapMap::get_mut].
+//! [`LeapMap::get`] and [`LeapMap::get_mut`].
 //!
 //! Getting the length of the map does not return the length of the map, but rather an
 //! estimate of the length, unless the calling thread is the only thread operating
@@ -103,7 +114,8 @@
 //! was found to be significant during benchmarking, and given that it's only an
 //! estimate, it's not worth the cost.
 //!
-//! The size of the map must always be a power of two.
+//! The size of the map must always be a power of two. This is handled internally
+//! and may change in the future to improve memory efficiency.
 //!
 //! The value type for the map needs to implement the [`Value`] trait, which is
 //! simple enough to implement, however, two values need to be chosen, one as a
@@ -123,6 +135,10 @@
 //! threads are attempting to modify the map concurrently, which makes the reszing
 //! efficient. Despite this, it is best to choose a larger size where possible,
 //! since it will ensure more stable performance of inserts and gets.
+//!
+//! # Features
+//!
+//! There is optional support for serde, via the "serde" feature.
 
 #![feature(allocator_api)]
 #![feature(const_fn_trait_bound)]
@@ -132,6 +148,9 @@ mod hashmap_iter;
 pub mod leapmap;
 pub mod leapref;
 pub mod util;
+
+#[cfg(feature = "serde")]
+mod hashmap_serde;
 
 use crate::util::load_u64_le;
 use std::borrow::Borrow;

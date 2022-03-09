@@ -1,10 +1,8 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use core_affinity::CoreId;
 use leapfrog::{LeapMap, Value};
 use rand::{thread_rng, Rng};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 const NUM_THREADS: u64 = 16;
 const KEYS_TO_INSERT: u64 = (1 << (NUM_THREADS + 9)) / NUM_THREADS;
@@ -134,7 +132,7 @@ fn insert_different_keys() {
                 "[Insert] Thread: {0:<2}, {1} ms, {2} keys/sec",
                 i,
                 time,
-                KEYS_TO_INSERT as f32 * (1000 as f32 / time as f32),
+                KEYS_TO_INSERT as f32 * (1000_f32 / time as f32),
             );
         }));
     }
@@ -160,7 +158,7 @@ fn insert_different_keys() {
                 "[Remove] Thread: {0:<2}, {1} ms, {2} keys/sec ",
                 i,
                 time,
-                KEYS_TO_INSERT as f32 * (1000 as f32 / time as f32),
+                KEYS_TO_INSERT as f32 * (1000_f32 / time as f32),
             );
         }));
     }

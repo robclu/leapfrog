@@ -14,6 +14,7 @@ categories = ["concurrency", "data-structures"]
 
 [features]
 default = []
+serde = []
 
 [profile.release]
 debug = true
@@ -21,16 +22,17 @@ lto = true
 
 [dependencies]
 atomic = "0.5.1"
-serde = { version = "1.0.136", features = ["derive"] }
+serde_crate = { package = "serde", version = "1.0.136", features = ["derive"] }
 
 [dev-dependencies]
-rand = "0.8.4"
 core_affinity = "0.5.10"
 criterion = "0.3.5"
+rand = "0.8.4"
+serde_json = "1.0.50"
 
 [[bench]]
 name = "hashmap"
 harness = false
 
-#[package.metadata.docs.rs]
-#features = ["serde"]
+[package.metadata.docs.rs]
+features = ["serde"]

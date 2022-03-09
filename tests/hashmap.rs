@@ -53,14 +53,14 @@ fn hashmap_insert() {
                 remove_checksum = remove_checksum.wrapping_add(key);
                 removed += 1;
             } else {
-                assert!(false);
+                panic!("Value should be found");
             }
 
             // Check get mut as well
             if let Some(value) = map.get_mut(&key) {
                 assert!(*value == key);
             } else {
-                assert!(false);
+                panic!("Value should be found");
             }
         }
         index += 1;

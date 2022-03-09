@@ -187,7 +187,7 @@ where
 /// map.insert(12, 17);
 /// map.insert(42, 23);
 ///
-/// assert_eq!(map.iter().count(), 2);
+/// assert_eq!(map.iter_mut().count(), 2);
 /// ```
 pub struct IterMut<'a, K, V, H: BuildHasher, A: Allocator> {
     map: &'a mut HashMap<K, V, H, A>,

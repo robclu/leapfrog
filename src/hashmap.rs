@@ -1,18 +1,19 @@
 use crate::hashmap_iter::{Iter, IterMut, OwnedIter};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
-use crate::{make_hash, MurmurHasher, Value};
-use std::alloc::{Allocator, Global};
-use std::{
+use crate::{make_hash, Value};
+use core::alloc::Allocator;
+use core::{
     borrow::Borrow,
     default::Default,
     hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
 };
+use std::alloc::Global;
 
 /// The type used for hashed keys.
 pub(crate) type HashedKey = u64;
 
 /// The default haser for the map.
-pub(crate) type DefaultHash = MurmurHasher;
+pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 
 /// Struct which stores a cell in a hash map. A cell is simply a hash (rather
 /// than the key iteself) and the value associated with the key for which the
@@ -142,14 +143,14 @@ impl<'a, K, V, H, A: Allocator> HashMap<K, V, H, A> {
     }
 }
 
-impl<K, V> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global>
+impl<K, V> HashMap<K, V, BuildHasherDefault<DefaultHash>, Global>
 where
     K: Eq + Hash + Clone,
     V: Value,
 {
     /// Creates the hash map with space for the default number of elements, which
     /// will use the global allocator for allocation of the map data.
-    pub fn new() -> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+    pub fn new() -> HashMap<K, V, BuildHasherDefault<DefaultHash>, Global> {
         Self::new_in(Global)
     }
 
@@ -157,10 +158,10 @@ where
     /// the global allocator for allocation of the map data.
     pub fn with_capacity(
         capacity: usize,
-    ) -> HashMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+    ) -> HashMap<K, V, BuildHasherDefault<DefaultHash>, Global> {
         Self::with_capacity_and_hasher_in(
             capacity,
-            BuildHasherDefault::<MurmurHasher>::default(),
+            BuildHasherDefault::<DefaultHash>::default(),
             Global,
         )
     }
@@ -211,6 +212,7 @@ where
         builder: H,
         allocator: A,
     ) -> HashMap<K, V, H, A> {
+        let capacity = round_to_pow2(capacity.max(4));
         let table = Self::allocate_and_init_table(&allocator, capacity);
         HashMap {
             table,
@@ -245,11 +247,15 @@ where
     /// ```
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
     where
-        K: Copy,
+        K: std::fmt::Debug,
     {
         let mut state = self.hash_builder.build_hasher();
         key.hash(&mut state);
         let hash = state.finish();
+        if hash == null_hash() {
+            println!("{:?} {}", key, hash);
+        }
+        debug_assert!(hash != null_hash());
         loop {
             let size_mask = self.get_table().size_mask;
             let buckets = self.get_table_mut().bucket_slice_mut();

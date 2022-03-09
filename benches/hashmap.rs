@@ -1,7 +1,6 @@
 use criterion::Criterion;
 use criterion::Throughput;
 use criterion::{criterion_group, criterion_main};
-use leapfrog::MurmurHasher;
 use rand::{thread_rng, Rng};
 use std::hash::BuildHasherDefault;
 
@@ -12,7 +11,7 @@ type HashFn = std::collections::hash_map::DefaultHasher;
 
 fn bench_leapfrog_hashmap(c: &mut Criterion) {
     let mut group = c.benchmark_group("leapfrog_hashmap");
-    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2 as u64));
+    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2_u64));
     group.sample_size(10);
     group.bench_function("insert_and_remove", |b| {
         let mut map = leapfrog::HashMap::with_capacity_and_hasher(
@@ -27,9 +26,9 @@ fn bench_leapfrog_hashmap(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..6 {
                 // Add 4 random bits
-                mask = mask << 4;
-                mask = mask | (bits & 0b00001111);
-                bits = bits >> 4;
+                mask <<= 4;
+                mask |= bits & 0b00001111;
+                bits >>= 4;
 
                 for i in 0..NUM_OPS {
                     let key: u64 = rng.gen::<u64>() & mask;
@@ -45,7 +44,7 @@ fn bench_leapfrog_hashmap(c: &mut Criterion) {
 
 fn bench_std_hashmap(c: &mut Criterion) {
     let mut group = c.benchmark_group("std_hashmap");
-    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2 as u64));
+    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2_u64));
     group.sample_size(10);
     group.bench_function("insert_and_remove", |b| {
         let mut map = std::collections::HashMap::with_capacity_and_hasher(
@@ -60,9 +59,9 @@ fn bench_std_hashmap(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..6 {
                 // Add 4 random bits
-                mask = mask << 4;
-                mask = mask | (bits & 0b00001111);
-                bits = bits >> 4;
+                mask <<= 4;
+                mask |= bits & 0b00001111;
+                bits >>= 4;
 
                 for i in 0..NUM_OPS {
                     let key: u64 = rng.gen::<u64>() & mask;
@@ -78,7 +77,7 @@ fn bench_std_hashmap(c: &mut Criterion) {
 
 fn bench_std_hashmap_rwlock(c: &mut Criterion) {
     let mut group = c.benchmark_group("std_hashmap_rw_lock");
-    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2 as u64));
+    group.throughput(Throughput::Elements(NUM_OPS * 6 * 2_u64));
     group.sample_size(10);
     group.bench_function("insert_and_remove", |b| {
         let map = std::sync::RwLock::new(std::collections::HashMap::with_capacity_and_hasher(
@@ -94,9 +93,9 @@ fn bench_std_hashmap_rwlock(c: &mut Criterion) {
             let mut map_write = map.write().unwrap();
             for _ in 0..6 {
                 // Add 4 random bits
-                mask = mask << 4;
-                mask = mask | (bits & 0b00001111);
-                bits = bits >> 4;
+                mask <<= 4;
+                mask |= bits & 0b00001111;
+                bits >>= 4;
 
                 for i in 0..NUM_OPS {
                     let key: u64 = rng.gen::<u64>() & mask;
