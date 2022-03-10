@@ -1,3 +1,4 @@
+use crate::leapiter::OwnedIter;
 use crate::leapref::{Ref, RefMut};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
@@ -105,7 +106,7 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
 
 impl<K, V> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Hash + Copy,
     V: Value,
 {
     /// Creates the hash map with space for the default number of elements, which
@@ -129,7 +130,7 @@ where
 
 impl<K, V, H> LeapMap<K, V, H, Global>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Hash + Copy,
     V: Value,
     H: BuildHasher + Default,
 {
@@ -143,7 +144,7 @@ where
 
 impl<'a, K, V, H, A> LeapMap<K, V, H, A>
 where
-    K: Eq + Hash + Clone + 'a,
+    K: Eq + Hash + Copy + 'a,
     V: Value + 'a,
     H: BuildHasher + Default,
     A: Allocator,
@@ -206,7 +207,7 @@ where
     /// let map = leapfrog::LeapMap::new();
     /// map.insert(0, 12);
     /// if let Some(mut r) = map.get(&0) {
-    ///     assert_eq!(r.value(), 12);
+    ///     assert_eq!(r.value(), Some(12));
     /// } else {
     ///     // Map is stale
     ///     assert!(false);
@@ -219,7 +220,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash).map(|cell| Ref::new(self, cell, hash))
+        self.find(key, hash).map(|cell| Ref::new(self, cell, hash))
     }
 
     /// Returns a mutable reference type to the value corresponding to the `key`.
@@ -236,7 +237,7 @@ where
     ///        // Map is being moved, can't update
     ///     }
     /// }
-    /// assert_eq!(map.get(&1).unwrap().value(), 14);
+    /// assert_eq!(map.get(&1).unwrap().value(), Some(14));
     /// assert!(map.get(&2).is_none());
     ///```
     pub fn get_mut<Q: ?Sized>(&'a self, key: &Q) -> Option<RefMut<'a, K, V, H, A>>
@@ -245,7 +246,8 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash).map(|cell| RefMut::new(self, cell, hash))
+        self.find(key, hash)
+            .map(|cell| RefMut::new(self, cell, hash))
     }
 
     /// Returns true if the map contains the specified `key`.
@@ -283,7 +285,7 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
-        self.find(hash).and_then(|cell| self.erase_value(cell))
+        self.find(key, hash).and_then(|cell| self.erase_value(cell))
     }
 
     /// Updates a key-value pair.
@@ -297,15 +299,19 @@ where
     ///
     /// ```
     /// let map = leapfrog::LeapMap::new();
-    /// assert_eq!(map.insert(37, 12), None);
-    /// assert_eq!(map.update(37, 14), Some(12));
+    /// assert_eq!(map.insert(&37, 12), None);
+    /// assert_eq!(map.update(&37, 14), Some(12));
     /// ```
-    pub fn update(&self, key: K, value: V) -> Option<V> {
-        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+    pub fn update<Q: ?Sized>(&self, key: &Q, value: V) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        let hash = make_hash::<K, _, H>(&self.hash_builder, key);
         debug_assert!(!value.is_null());
 
         loop {
-            match self.find(hash) {
+            match self.find(key, hash) {
                 Some(cell) => {
                     let old = cell.value.load(Ordering::Relaxed);
                     match Self::exchange_value(cell, value, old) {
@@ -318,7 +324,7 @@ where
                         }
                         ConcurrentInsertResult::Overflow(_) => {
                             // This should never happen, so we panic if it does.
-                            assert!(false);
+                            panic!("LeapMap update overflowed");
                         }
                         ConcurrentInsertResult::Migration(_) => {
                             // Help with the migration and then try again
@@ -361,7 +367,7 @@ where
             let size_mask = table.size_mask;
             let buckets = table.bucket_slice_mut();
 
-            match Self::insert_or_find(hash, value, buckets, size_mask) {
+            match Self::insert_or_find(hash, &key, value, buckets, size_mask) {
                 ConcurrentInsertResult::Overflow(overflow_index) => {
                     // Try and create the table migration. Only a single thread
                     // should do this. Any threads which don't get the flag should
@@ -440,15 +446,19 @@ where
 
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a reference to the cell if the find succeeded.
-    pub(crate) fn find(&self, hash: HashedKey) -> Option<&'a AtomicCell<V>> {
-        debug_assert!(hash != Self::null_hash());
+    pub(crate) fn find<Q: ?Sized>(&self, key: &Q, hash: HashedKey) -> Option<&'a AtomicCell<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        debug_assert!(hash != null_hash());
 
         loop {
             let table = self.get_table(Ordering::Acquire);
             let size_mask = table.size_mask;
             let buckets = table.bucket_slice();
 
-            if let Some(cell) = self.find_inner(hash, buckets, size_mask) {
+            if let Some(cell) = self.find_inner(key, hash, buckets, size_mask) {
                 let value = cell.value.load(Ordering::Acquire);
                 if !value.is_redirect() {
                     if value.is_null() {
@@ -470,18 +480,24 @@ where
     /// `buckets`, which have an assosciated `size_mask` representing the number
     /// of cells in the buckets. This returns a reference to the cell if the
     /// find was successful.
-    fn find_inner(
+    fn find_inner<Q: ?Sized>(
         &self,
+        key: &Q,
         hash: HashedKey,
         buckets: &'a [Bucket<K, V>],
         size_mask: usize,
-    ) -> Option<&'a AtomicCell<V>> {
+    ) -> Option<&'a AtomicCell<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
         let mut index = hash as usize & size_mask;
         let cell = get_cell(buckets, index, size_mask);
         let probe_hash = cell.hash.load(Ordering::Relaxed);
-        if hash == probe_hash {
+        let probe_key = cell.key.load(Ordering::Relaxed);
+        if hash == probe_hash && key.eq(probe_key.borrow()) {
             return Some(cell);
-        } else if probe_hash == Self::null_hash() {
+        } else if probe_hash == null_hash() {
             return None;
         }
 
@@ -491,11 +507,12 @@ where
             index = (index + delta as usize) & size_mask;
             let cell = get_cell(buckets, index, size_mask);
             let probe_hash = cell.hash.load(Ordering::Relaxed);
+            let probe_key = cell.key.load(Ordering::Relaxed);
 
             // NOTE: It's possible that a concurrent insert memory reordering
             //       causes probe_hash to be default, but we don't need to check
             //       for that case, and we can just follow the probe chain.
-            if probe_hash == hash {
+            if probe_hash == hash && key.eq(probe_key.borrow()) {
                 return Some(cell);
             }
 
@@ -514,7 +531,7 @@ where
     /// value, or modify any deltas for the probe chain, since that would break
     /// lookups of other cells in the map. This also means that if another cell
     /// is inserted with the same hash then there is a faster path when inserting.
-    fn erase_value(&self, mut cell: &'a AtomicCell<V>) -> Option<V> {
+    fn erase_value(&self, mut cell: &'a AtomicCell<K, V>) -> Option<V> {
         loop {
             let value = cell.value.load(Ordering::Relaxed);
 
@@ -525,6 +542,7 @@ where
                 return None;
             }
 
+            let key = cell.key.load(Ordering::Relaxed);
             match cell.value.compare_exchange(
                 value,
                 V::null(),
@@ -548,7 +566,7 @@ where
                     let hash = cell.hash.load(Ordering::Relaxed);
                     loop {
                         self.participate_in_migration();
-                        match self.find(hash) {
+                        match self.find(&key, hash) {
                             Some(new_cell) => {
                                 cell = new_cell;
                                 // This should almost always be true, migration is finished.
@@ -629,7 +647,7 @@ where
             let index = migrator.stale_source_index((last_source + i) as usize);
 
             // If this is not null, then we have wrapped:
-            // FIXME: Fix this error ...
+            // FIXME: This occasionally causes a panic in the tests!
             debug_assert!(migrator.stale_sources[index]
                 .load(Ordering::Relaxed)
                 .is_null());
@@ -856,6 +874,7 @@ where
     /// a migration is in progress.
     pub(super) fn insert_or_find(
         hash: HashedKey,
+        key: &K,
         value: V,
         buckets: &[Bucket<K, V>],
         size_mask: usize,
@@ -867,14 +886,17 @@ where
         let cell = get_cell(buckets, index, size_mask);
         let mut probe_hash = cell.hash.load(Ordering::Relaxed);
 
-        if probe_hash == Self::null_hash() {
+        if probe_hash == null_hash() {
             match cell
                 .hash
                 .compare_exchange(probe_hash, hash, Ordering::Relaxed, Ordering::Relaxed)
             {
                 Ok(_) => {
-                    // Succeeded in setting the hash and claiming the cell, try
-                    // and exchange the value:
+                    // This is an empty cell, and we won the race to claim it.
+                    // We can just set the key. The only problem we could have
+                    // here is a migration, in which case the value exchange below
+                    // will fail.
+                    cell.key.store(*key, Ordering::Relaxed);
                     return Self::exchange_value(cell, value, V::null());
                 }
                 Err(new_hash) => {
@@ -884,8 +906,10 @@ where
             }
         }
 
-        // Hash already in table, exchange and return the value.
-        if probe_hash == hash {
+        // Hash already in table, check if the keys match, if they do then we
+        // can exchange and return the value.
+        let probe_key = cell.key.load(Ordering::Relaxed);
+        if probe_hash == hash && probe_key.eq(key.borrow()) {
             let old_value = cell.value.load(Ordering::Acquire);
 
             // Check if the table is being moved:
@@ -897,6 +921,7 @@ where
             return Self::exchange_value(cell, value, old_value);
         }
 
+        // Hard part, need to find a new cell ...
         // Follow the linked probes to find a new cell.
         // Here, we get the offset delta which will allow us to find the desired
         // bucket. After that, we need to use the second set of delta values to
@@ -918,23 +943,24 @@ where
 
                 let cell = get_cell(buckets, index, size_mask);
                 let mut probe_hash = cell.hash.load(Ordering::Relaxed);
-                if probe_hash == Self::null_hash() {
+                if probe_hash == null_hash() {
                     // The cell has been linked to the probe chain, but the hash
                     // is not yet visible. We chould change this here to use
                     // acquire and release, which would guarantee that the change
-                    // is visible, but it's easier to just poll: FIXME
+                    // is visible, but it's easier to just poll:
+                    // FIXME : Cange this to acquire releaase ...
                     loop {
                         probe_hash = cell.hash.load(Ordering::Acquire);
-                        if probe_hash != Self::null_hash() {
+                        if probe_hash != null_hash() {
                             break;
                         }
                     }
                 }
 
-                // Only hashes in the same bucket can be linked:
+                // Only hashes in the same bucket can be linked.
                 debug_assert!((probe_hash ^ hash) as usize & size_mask == 0);
-
-                if probe_hash == hash {
+                let probe_key = cell.key.load(Ordering::Relaxed);
+                if probe_hash == hash && probe_key.eq(key.borrow()) {
                     let old_value = cell.value.load(Ordering::Acquire);
 
                     // Check if the table is being moved:
@@ -946,7 +972,7 @@ where
                 }
 
                 // We updated the index and the delta value, so we will go back
-                // to the start of the loop and search the next probe in the chain ...
+                // to the start of the loop and search the next probe in the chain
             } else {
                 // We have reached the end of the probe chain for the current
                 // bucket. We now need to move to linear probing until we either
@@ -963,7 +989,7 @@ where
                     // to the previous cell in the same bucket.
                     let cell = get_cell(buckets, index, size_mask);
                     let mut probe_hash = cell.hash.load(Ordering::Relaxed);
-                    if probe_hash == Self::null_hash() {
+                    if probe_hash == null_hash() {
                         // Same as above, there is an empty cell, we we want to
                         // try and reserve it. If we lose the race here, then
                         // we just fall through to the next stage ...
@@ -977,6 +1003,10 @@ where
                                 // Now link the cell to the previous cell in the same bucket:
                                 let offset = (index - prev_link_index) as u8;
                                 prev_link.store(offset, Ordering::Relaxed);
+
+                                // CHECK: No race here with another cell
+                                cell.key.store(*key, Ordering::Relaxed);
+
                                 return Self::exchange_value(cell, value, V::null());
                             }
                             Err(updated) => probe_hash = updated,
@@ -985,7 +1015,8 @@ where
 
                     // Check for the same hash, so we can replace:
                     let x = hash ^ probe_hash;
-                    if x == 0 {
+                    let probe_key = cell.key.load(Ordering::Relaxed);
+                    if x == 0 && probe_key == *key {
                         let old_value = cell.value.load(Ordering::Acquire);
                         return Self::exchange_value(cell, value, old_value);
                     }
@@ -1035,7 +1066,11 @@ where
     /// If the exchange returns a redirect value then this will return a
     /// [ConcurrentInsertResult::Migration] with the `desired` value, which
     /// needs to be inserted into the new table.
-    fn exchange_value(cell: &AtomicCell<V>, desired: V, old_value: V) -> ConcurrentInsertResult<V> {
+    fn exchange_value(
+        cell: &AtomicCell<K, V>,
+        desired: V,
+        old_value: V,
+    ) -> ConcurrentInsertResult<V> {
         let exchange_result =
             cell.value
                 .compare_exchange(old_value, desired, Ordering::AcqRel, Ordering::Relaxed);
@@ -1088,6 +1123,10 @@ where
                 unsafe {
                     let cell_hash = &mut buckets[i].cells[cell].hash as *mut AtomicHashedKey;
                     std::ptr::write_bytes(cell_hash, 0, 1);
+
+                    // FIXME: Might need to add this:
+                    //let cell_key = &mut buckets[i].cells[cell].hash as *mut K;
+                    //std::ptr::write_bytes(cell_key, 0, 1);
                 };
 
                 // FIXME: We should check if the stored type is directly writable ..
@@ -1105,10 +1144,17 @@ where
         table_ptr
     }
 
-    /// Returns the null hash value.
-    #[inline]
-    const fn null_hash() -> HashedKey {
-        0u64
+    pub(crate) fn get_cell_at_index(&'a self, index: usize) -> Option<Ref<'a, K, V, H, A>> {
+        let table = self.get_table(Ordering::Acquire);
+        if index >= table.size() {
+            return None;
+        }
+
+        let buckets = table.bucket_slice();
+        let size_mask = table.size_mask;
+        let cell = get_cell(buckets, index, size_mask);
+        let cell_hash = cell.hash.load(Ordering::Relaxed);
+        Some(Ref::new(self, cell, cell_hash))
     }
 
     /// Calculates the number of remaining migration units for the `size_mask`.
@@ -1142,6 +1188,27 @@ impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
     }
 }
 
+impl<K, V, H, A> IntoIterator for LeapMap<K, V, H, A>
+where
+    K: Eq + Hash + Copy,
+    V: Value,
+    H: BuildHasher + Default,
+    A: Allocator,
+{
+    type Item = (K, V);
+    type IntoIter = OwnedIter<K, V, H, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OwnedIter::new(self)
+    }
+}
+
+/// Returns the null hash value.
+#[inline]
+pub(crate) const fn null_hash() -> u64 {
+    0u64
+}
+
 /// Gets a reference to a cell using the `index` to find the cell in the
 /// `buckets` slice.
 #[inline]
@@ -1149,7 +1216,7 @@ fn get_cell<K, V: Value>(
     buckets: &[Bucket<K, V>],
     index: usize,
     size_mask: usize,
-) -> &AtomicCell<V> {
+) -> &AtomicCell<K, V> {
     let bucket_index = get_bucket_index(index, size_mask);
     let cell_index = get_cell_index(index);
     &buckets[bucket_index].cells[cell_index]
@@ -1243,11 +1310,19 @@ impl<K, V> Table<K, V> {
 /// Here we need the value to be atomic. Since V is generic, it's possible that
 /// there is no built-in atomic support for it, in which case the `Atomic`
 /// type will fall back to using an efficient spinlock implementation.
-pub struct AtomicCell<V> {
+pub struct AtomicCell<K, V> {
     /// The hashed value of the cell.
     pub(crate) hash: AtomicHashedKey,
+    /// The key for the cell.
+    pub(crate) key: Atomic<K>,
     /// The value assosciated with the hash.
     pub(crate) value: Atomic<V>,
+}
+
+impl<K, V> AtomicCell<K, V> {
+    fn is_empty(&self) -> bool {
+        self.hash.load(Ordering::Relaxed) == null_hash()
+    }
 }
 
 /// Struct which stores buckets of cells. Each bucket stores four cells
@@ -1261,9 +1336,7 @@ pub(super) struct Bucket<K, V> {
     /// delta value means.
     deltas: [AtomicU8; 8],
     /// Cells for the bucket.
-    cells: [AtomicCell<V>; 4],
-    /// Placeholder for the key.
-    _key: std::marker::PhantomData<K>,
+    cells: [AtomicCell<K, V>; 4],
 }
 
 /// A struct for a migration source, which stores a pointer to the source buckets
@@ -1443,7 +1516,7 @@ impl<K, V> Migrator<K, V> {
         end_index: usize,
     ) -> bool
     where
-        K: Hash + Eq + Clone,
+        K: Hash + Eq + Copy,
         H: BuildHasher + Default,
         A: Allocator,
         V: Value,
@@ -1465,7 +1538,7 @@ impl<K, V> Migrator<K, V> {
 
                 // Check if we have an unused cell, in which case we need to put
                 // a redirect marker in its place.
-                if src_hash == LeapMap::<K, V, H, A>::null_hash() {
+                if src_hash == null_hash() {
                     match cell.value.compare_exchange(
                         V::null(),
                         V::redirect(),
@@ -1509,6 +1582,8 @@ impl<K, V> Migrator<K, V> {
                         break;
                     }
 
+                    let src_key = cell.key.load(Ordering::Relaxed);
+
                     // We need to perform a migration of the cell. This should
                     // change. We actually want to get a reference to the cell
                     // here, and then try to exchange it here, rather than
@@ -1516,6 +1591,7 @@ impl<K, V> Migrator<K, V> {
                     loop {
                         match LeapMap::<K, V, H, A>::insert_or_find(
                             src_hash,
+                            &src_key,
                             src_value,
                             dst_buckets,
                             dst_size_mask,

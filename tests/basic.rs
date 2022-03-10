@@ -2,6 +2,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use core_affinity::CoreId;
 use leapfrog::{LeapMap, Value};
 use rand::{thread_rng, Rng};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const NUM_THREADS: u64 = 16;
@@ -68,7 +69,7 @@ fn remove_keys(
         if key != u64::default() && key != <u64 as Value>::redirect() {
             match map.get(&key) {
                 Some(mut value_ref) => {
-                    checksum = checksum.wrapping_add(value_ref.value());
+                    checksum = checksum.wrapping_add(value_ref.value().unwrap());
                     /*
                     match value_ref.value() {
                         Some(v) => {
@@ -178,4 +179,52 @@ fn insert_different_keys() {
         insert.max(remove) - insert.min(remove)
     );
     assert!(insert == remove);
+}
+
+fn generate_kvs(keys: usize) -> BTreeMap<u64, u64> {
+    let mut map = BTreeMap::new();
+
+    let mut rng = thread_rng();
+    let start_index: u32 = rng.gen();
+    let value: u32 = rng.gen();
+    let relative_prime: u64 = value as u64 * 2 + 1;
+
+    let mut index = start_index;
+    for _ in 0..keys {
+        let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
+        key = key ^ (key >> 16);
+        map.insert(key, key + 1);
+
+        index += 1;
+    }
+
+    map
+}
+
+// Very basic, validate the single threaded iteration works.
+#[test]
+fn leapmap_into_iter() {
+    const KEYS: usize = 150;
+    let map = LeapMap::new();
+    let kv_map = generate_kvs(KEYS);
+
+    for (k, v) in kv_map.iter() {
+        let val = *v;
+        let key = *k;
+        map.insert(key, val);
+    }
+
+    assert_eq!(map.len(), KEYS);
+
+    let mut count = 0usize;
+    for (k, v) in map.into_iter() {
+        if let Some(val) = kv_map.get(&k) {
+            assert_eq!(v, *val);
+        } else {
+            panic!("LeapMap value is incorrect");
+        }
+        count += 1;
+    }
+
+    assert_eq!(count, KEYS);
 }

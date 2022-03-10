@@ -145,6 +145,7 @@
 
 pub mod hashmap;
 mod hashmap_iter;
+pub mod leapiter;
 pub mod leapmap;
 pub mod leapref;
 pub mod util;

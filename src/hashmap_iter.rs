@@ -1,4 +1,4 @@
-use std::{
+use core::{
     alloc::Allocator,
     hash::{BuildHasher, Hash},
 };

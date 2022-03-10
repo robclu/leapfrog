@@ -23,7 +23,6 @@ struct Environment {
     vals1: Vec<AtomicU64>,
     vals2: Vec<AtomicU64>,
     ind_dist: Uniform<usize>,
-    third_dist: Uniform<usize>,
     val_dist1: Uniform<Value>,
     val_dist2: Uniform<Value>,
     in_table: Vec<AtomicBool>,
@@ -102,8 +101,8 @@ fn stress_insert_thread(env: Arc<Environment>) {
             assert_ne!(res1, in_table);
             assert_ne!(res2, in_table);
             if res1 {
-                assert_eq!(env.table1.get(&key).unwrap().value(), val1);
-                assert_eq!(env.table2.get(&key).unwrap().value(), val2);
+                assert_eq!(env.table1.get(&key).unwrap().value(), Some(val1));
+                assert_eq!(env.table2.get(&key).unwrap().value(), Some(val2));
                 env.vals1[idx].store(val1, Ordering::Relaxed);
                 env.vals2[idx].store(val2, Ordering::Relaxed);
                 env.in_table[idx].store(true, Ordering::Relaxed);
@@ -156,12 +155,12 @@ fn stress_find_thread(env: Arc<Environment>) {
 
             let value = env.table1.get(&key);
             if value.is_some() {
-                assert_eq!(val1, value.unwrap().value());
+                assert_eq!(Some(val1), value.unwrap().value());
                 assert!(env.in_table[idx].load(Ordering::Relaxed));
             }
             let value = env.table2.get(&key);
             if value.is_some() {
-                assert_eq!(val2, value.unwrap().value());
+                assert_eq!(Some(val2), value.unwrap().value());
                 assert!(env.in_table[idx].load(Ordering::Relaxed));
             }
             env.num_finds.fetch_add(2, Ordering::Relaxed);
@@ -175,7 +174,6 @@ fn stress_update_thread(env: Arc<Environment>) {
 
     while !env.finished.load(Ordering::SeqCst) {
         let idx = env.ind_dist.sample(&mut rng);
-        let case = env.third_dist.sample(&mut rng);
         if env.in_use[idx]
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
@@ -186,19 +184,16 @@ fn stress_update_thread(env: Arc<Environment>) {
             let in_table = env.in_table[idx].load(Ordering::Relaxed);
 
             // Change this if we add update_fn and/or upsert_fn
-            let res = match case {
-                // Update
-                _ => {
-                    let res1 = env.table1.update(key, val1).map_or(false, |_| true);
-                    let res2 = env.table2.update(key, val2).map_or(false, |_| true);
-                    assert_eq!(res1, in_table);
-                    assert_eq!(res2, in_table);
-                    res1
-                }
+            let res = {
+                let res1 = env.table1.update(&key, val1).map_or(false, |_| true);
+                let res2 = env.table2.update(&key, val2).map_or(false, |_| true);
+                assert_eq!(res1, in_table);
+                assert_eq!(res2, in_table);
+                res1
             };
             if res {
-                assert_eq!(val1, env.table1.get(&key).unwrap().value());
-                assert_eq!(val2, env.table2.get(&key).unwrap().value());
+                assert_eq!(Some(val1), env.table1.get(&key).unwrap().value());
+                assert_eq!(Some(val2), env.table2.get(&key).unwrap().value());
                 env.vals1[idx].store(val1, Ordering::Relaxed);
                 env.vals2[idx].store(val2, Ordering::Relaxed);
                 env.num_updates.fetch_add(2, Ordering::Relaxed);
