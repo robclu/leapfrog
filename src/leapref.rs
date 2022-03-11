@@ -104,7 +104,7 @@ where
     }
 }
 
-/// A reference type to a cell in a [LeapMap] which can mutate the referenced
+/// A reference type to a cell in a [`LeapMap`] which can mutate the referenced
 /// cell value.
 pub struct RefMut<'a, K, V, H, A: Allocator> {
     /// The atomic value which is being referenced.
@@ -112,7 +112,7 @@ pub struct RefMut<'a, K, V, H, A: Allocator> {
     /// Reference to the map in which the cell belongs.
     map: &'a LeapMap<K, V, H, A>,
     /// The hash for the cell at the point when the cell was found
-    hash: u64,
+    pub(crate) hash: u64,
 }
 
 impl<'a, K, V, H, A> RefMut<'a, K, V, H, A>
@@ -130,6 +130,25 @@ where
         RefMut { map, cell, hash }
     }
 
+    /// Loads the key for the referenced cell.
+    ///
+    /// This requires `&mut self` since it's possible that the underlying data
+    /// for the map has been migrated, and that therefore the referenced cell
+    /// is out of date, and returning the current value will be incorrect. In
+    /// such a case, the cell needs to be updated to reference the correct cell,
+    /// hence `mut self`. This ensures that the returned value is always the
+    /// most up to date value.
+    ///
+    /// It is also possible that the cell has been deleted, in which case the
+    /// returned value will be `None`
+    pub fn key(&mut self) -> Option<K>
+    where
+        K: Eq + Hash + Copy,
+        H: BuildHasher + Default,
+    {
+        self.key_value().map(|(k, _v)| k)
+    }
+
     /// Loads the value for the referenced cell.
     ///
     /// This requires `&mut self` since it's possible that the underlying data
@@ -140,25 +159,45 @@ where
     /// most up to date value.
     ///
     /// It is also possible that the cell has been deleted, in which case the
-    /// returned value will be `V::null()`.
-    pub fn value(&mut self) -> V
+    /// returned value will be `None`
+    pub fn value(&mut self) -> Option<V>
+    where
+        K: Eq + Hash + Copy,
+        H: BuildHasher + Default,
+    {
+        self.key_value().map(|(_k, v)| v)
+    }
+
+    /// Loads the key-value pair for the referenced cell.
+    ///
+    /// This requires `&mut self` since it's possible that the underlying data
+    /// for the map has been migrated, and that therefore the referenced cell
+    /// is out of date, and returning the current value will be incorrect. In
+    /// such a case, the cell needs to be updated to reference the correct cell,
+    /// hence `mut self`. This ensures that the returned value is always the
+    /// most up to date value.
+    ///
+    /// It is also possible that the cell has been deleted, in which case the
+    /// returned value will be `None`.
+    pub fn key_value(&mut self) -> Option<(K, V)>
     where
         K: Eq + Hash + Copy,
         H: BuildHasher + Default,
     {
         loop {
             let value = self.cell.value.load(Ordering::Relaxed);
+            let key = self.cell.key.load(Ordering::Relaxed);
             if value.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
                 self.map.participate_in_migration();
-                let key = self.cell.key.load(Ordering::Relaxed);
                 if let Some(new_cell) = self.map.find(&key, self.hash) {
                     self.cell = new_cell;
                 } else {
-                    panic!("Migration caused removal of cell");
+                    // Migration caused removal of cell:
+                    return None;
                 }
             } else {
-                return value;
+                return Some((key, value));
             }
         }
     }
@@ -187,7 +226,8 @@ where
                 if let Some(new_cell) = self.map.find(&key, self.hash) {
                     self.cell = new_cell;
                 } else {
-                    panic!("Migration caused removal of cell");
+                    // Cell has been removed
+                    return None;
                 }
             } else if current.is_null() {
                 // Value has been erased, we can just return.
@@ -224,10 +264,11 @@ where
                 if let Some(new_cell) = self.map.find(&key, self.hash) {
                     self.cell = new_cell;
                 } else {
-                    panic!("Migration caused removal of cell");
+                    // Cell has been removed:
+                    return None;
                 }
             } else if current.is_null() {
-                // Value has been erased, return None.
+                // Value has been erased.
                 return None;
             } else if self
                 .cell
@@ -237,6 +278,7 @@ where
             {
                 return Some(current);
             }
+
             // Lost the race to update the cell, go and try again
         }
     }

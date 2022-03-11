@@ -1,4 +1,4 @@
-use crate::leapiter::OwnedIter;
+use crate::leapiter::{Iter, IterMut, OwnedIter};
 use crate::leapref::{Ref, RefMut};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, MurmurHasher, Value};
@@ -405,6 +405,66 @@ where
                 }
             }
         }
+    }
+
+    /// Creates an iterator over a [`LeapMap`] which yields immutable key-value
+    /// pairs.
+    ///
+    /// # Threading
+    ///
+    /// This is thread-safe and can be called from any number of threads, and
+    /// will *not* deadlock. See the [`Ref`] type for how to access iterated
+    /// values.
+    //
+    /// # Examples
+    ///
+    /// ```
+    /// use leapfrog::HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert(12, 27);
+    /// assert_eq!(map.iter().count(), 1);
+    ///
+    /// for mut item in map.iter() {
+    ///     assert_eq!(item.key_value(), Some((12, 27)));
+    /// }
+    /// ```
+    pub fn iter(&'a self) -> Iter<'a, K, V, H, A> {
+        Iter::new(self)
+    }
+
+    /// Creates an iterator over a [`LeapMap`] which yields mutable key-value
+    /// pairs.
+    ///
+    /// # Threading
+    ///
+    /// This is thread-safe and can be called from any number of threads, and
+    /// will *not* deadlock. See the [`Ref`] type for how to access iterated
+    /// values.
+    //
+    /// # Examples
+    ///
+    /// ```
+    /// use leapfrog::HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert(12, 27);
+    /// map.insert(13, 28);
+    /// assert_eq!(map.iter_mut().count(), 1);
+    ///
+    /// for mut item in map.iter_mut() {
+    ///     let old = item.update_value(|&mut v| {
+    ///         let val = *v;
+    ///         *v = val + val;
+    ///     });
+    ///     assert!(old.is_some());
+    /// }
+    ///
+    /// assert_eq!(map.get(&12).unwrap().value(), Some(54));
+    /// assert_eq!(map.get(&13).unwrap().value(), Some(56));
+    /// ```
+    pub fn iter_mut(&'a self) -> IterMut<'a, K, V, H, A> {
+        IterMut::new(self)
     }
 
     /// Returns the length of the map.
@@ -1142,6 +1202,19 @@ where
         table.size_mask = cells - 1;
 
         table_ptr
+    }
+
+    pub(crate) fn get_cell_at_index_mut(&'a self, index: usize) -> Option<RefMut<'a, K, V, H, A>> {
+        let table = self.get_table(Ordering::Acquire);
+        if index >= table.size() {
+            return None;
+        }
+
+        let buckets = table.bucket_slice();
+        let size_mask = table.size_mask;
+        let cell = get_cell(buckets, index, size_mask);
+        let cell_hash = cell.hash.load(Ordering::Relaxed);
+        Some(RefMut::new(self, cell, cell_hash))
     }
 
     pub(crate) fn get_cell_at_index(&'a self, index: usize) -> Option<Ref<'a, K, V, H, A>> {

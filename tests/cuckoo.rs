@@ -57,7 +57,6 @@ impl Environment {
             vals1,
             vals2,
             ind_dist: Uniform::from(0..NUM_KEYS - 1),
-            third_dist: Uniform::from(0..3),
             val_dist1: Uniform::from(Value::min_value()..Value::max_value() - 2),
             val_dist2: Uniform::from(Value::min_value()..Value::max_value() - 2),
             in_table,
