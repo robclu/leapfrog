@@ -1,7 +1,7 @@
 use crate::leapiter::{Iter, IterMut, OwnedIter};
 use crate::leapref::{Ref, RefMut};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
-use crate::{make_hash, MurmurHasher, Value};
+use crate::{make_hash, Value};
 use atomic::Atomic;
 use std::alloc::{Allocator, Global};
 use std::borrow::Borrow;
@@ -10,68 +10,61 @@ use std::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
 
-/// The type used for hashed keys.
-type HashedKey = u64;
-
-/// The atomic type of the hashed key.
-type AtomicHashedKey = AtomicU64;
-
-/// Result types when an insert into a [LeapMap].
-pub(super) enum ConcurrentInsertResult<V> {
-    /// The insertion found a cell for the key, replaced the old value with
-    /// a new one, and returned the old value.
-    Replaced(V),
-    /// The insertion was performed with a new key, so a new cell was filled.
-    NewInsert,
-    /// The insertion found a cell whose value was stale, so the map data needs
-    /// to be migrated, after which the value should be inserted into the migrated
-    /// map.
-    Migration(V),
-    /// No new cell was found for the key withing the linear search range,
-    /// so we overflowed the max delta value and need to move the map to
-    /// a larger table.
-    Overflow(usize),
-}
+/// The default hasher for a [`LeapMap`].
+pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 
 /// A concurrent hash map implementation which uses a modified form of RobinHood/
-/// Hopscotch probing. This implementation is lock-free, and therefore it
-/// *not possible* to deadlock.
+/// Hopscotch probing. This implementation is lock-free, and therefore it will
+/// *not* deadlock when any of the map operations are performed concurrently.
+/// The map is lock-free if the key and value types have built-in atomic support,
+/// and if not, an efficient spin-lock is used.
 ///
-/// By default, the `LeapMap` map uses Murmur for hahsing, see [MurmurHasher],
-/// however, it's simple enough to change the hasher, just create the map
-/// using `with_hasher` or `with_capacity_and_hasher`.
+/// By default, the `LeapMap` map uses the default hasher from the standard
+/// library, which is DOS resistent, but is less efficient. Any other hasher
+/// can be used instead, likely with improved performance but less security.
+/// Using a different hasher is as simple a reating the map using the
+/// `with_hasher` or `with_capacity_and_hasher` methods.
 ///
-/// This requires that the value type implement [Value], which is very simple
-/// to do, and requires that a two values of the value type to be stored to be
-/// used as a null and redirect flags. It's best to choose something that is
-/// simple and efficeint to evaluate. For example, u64 uses u64::MAX and u64::MAx -1,
-/// respectively.
+/// Values stored in the map need to mplement the [`Value`] trait. The trait is
+/// simple to implement, requiring that two values be reserved, one for the
+/// `null` case, which is used as a placeholder, and one for a `redirect`, which
+/// is used to signal that the map is being migrated. This trait is only implemented
+/// for numeric types and uses MAX and MAX -1 for the null and redirect values,
+/// respectively. For any other type this needs to be implemented.
+///
+/// This map is very fast for concurrent operations since the locking is either
+/// atomic or uses very finer grained locking than other maps.
 ///
 /// # Limitations
 ///
-/// This hash map *does not* store keys, so if that is required, then another
-/// map would be better.
+/// This biggest limitations of this map are that the interface is slightly
+/// different than using [`std::sync::RwLock<HashMap>`]. The type returned
+/// when calling `get`, `get_mut`, `iter`, etc, are not references, but rather a
+/// [`Ref`] or [`RefMut`] type which acts like a reference but still allows concurrent
+/// operations on both that reference type and the map. This interface is still
+/// being worked out, and might be changed in the future.
 ///
-/// Currently, moving the table *does not* use a custom allocator, which would
-/// further improve the implementation.
+/// When adding a key-value pair to the map, it's possible that the map is too
+/// full and there is no bucket, in which case a larger map needs to be allocated
+/// and then filled from the old map. This will happen concurrently. The current
+/// implementation *does not* use a custom allocator, but would likely further
+/// improve the performance.
 ///
-/// The number of elements in the map must be a power of two.
+/// The number of elements in the map must be a power of two. This is handled
+/// internally.
 ///
-/// The biggest difference between this map and the std HashMap with a RwLock,
-/// or something similatr, is the type returned when calling `get` and `get_mut`.
-/// Here, we return a reference type to the value in the map, however, the type
-/// is atomic, and therefore needs to be modified and accessed atomically. While
-/// it would be possible to give a reference to the value, it would require
-/// locking the map, which is inefficient for concurrent use. We therefore
-/// return [Ref] or [RefMut] types, which provide methods to safely and efficiently
-/// modify the value. Altrenatively, a better way to modify values in the map is
-/// to simply use `update`.
+/// Lastly, this map stores additional data for each key-value pair. There are
+/// 8 bytes used to store offsets for the probe search, and 8 bytes for the hashed
+/// key. This is quite a lot of overhead, but this map is designed for good performace
+/// and scaling. This will be a focus area for improvement in the future, but if
+/// memory use is more important that performance, another map will be a better
+/// choice.
 ///
 /// # Threading
 ///
-/// The map *is* thread-safe, and items cana be added, removed, and updated from
-/// any number of threads concurrently.
-pub struct LeapMap<K, V, H = BuildHasherDefault<MurmurHasher>, A: Allocator = Global> {
+/// The map *is* thread-safe, and items can be added, removed, pdated, and iterated
+/// over cuncurrently from any number of threads.
+pub struct LeapMap<K, V, H = BuildHasherDefault<DefaultHash>, A: Allocator = Global> {
     /// Pointer to the buckets for the map. This needs to be a pointer to that
     /// we can atomically get the buckets for operations, since when the map
     /// is resized the buckets might change, and we need to ensure that all
@@ -104,14 +97,14 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
     }
 }
 
-impl<K, V> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global>
+impl<K, V> LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global>
 where
     K: Eq + Hash + Copy,
     V: Value,
 {
     /// Creates the hash map with space for the default number of elements, which
     /// will use the global allocator for allocation of the map data.
-    pub fn new() -> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+    pub fn new() -> LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global> {
         Self::new_in(Global)
     }
 
@@ -119,10 +112,10 @@ where
     /// the global allocator for allocation of the map data.
     pub fn with_capacity(
         capacity: usize,
-    ) -> LeapMap<K, V, BuildHasherDefault<MurmurHasher>, Global> {
+    ) -> LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global> {
         Self::with_capacity_and_hasher_in(
             capacity,
-            BuildHasherDefault::<MurmurHasher>::default(),
+            BuildHasherDefault::<DefaultHash>::default(),
             Global,
         )
     }
@@ -381,9 +374,6 @@ where
                             overflow_index,
                         );
                         migrator.set_initialization_complete_flag();
-                    } else {
-                        // Try and clean up any old migration tables.
-                        //migrator.cleanup_stale_table(&self.allocator);
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -419,9 +409,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// use leapfrog::HashMap;
+    /// use leapfrog::LeapMap;
     ///
-    /// let mut map = HashMap::new();
+    /// let map = LeapMap::new();
     /// map.insert(12, 27);
     /// assert_eq!(map.iter().count(), 1);
     ///
@@ -445,17 +435,17 @@ where
     /// # Examples
     ///
     /// ```
-    /// use leapfrog::HashMap;
+    /// use leapfrog::LeapMap;
     ///
-    /// let mut map = HashMap::new();
-    /// map.insert(12, 27);
-    /// map.insert(13, 28);
-    /// assert_eq!(map.iter_mut().count(), 1);
+    /// let map = LeapMap::new();
+    /// map.insert(12u32, 27u32);
+    /// map.insert(13u32, 28u32);
+    /// assert_eq!(map.iter_mut().count(), 2);
     ///
     /// for mut item in map.iter_mut() {
-    ///     let old = item.update_value(|&mut v| {
-    ///         let val = *v;
-    ///         *v = val + val;
+    ///     let old = item.update(|v| {
+    ///         let current = *v;
+    ///         *v = current + current;
     ///     });
     ///     assert!(old.is_some());
     /// }
@@ -1173,24 +1163,21 @@ where
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
         // we can write them as zero, rather than calling the atomic versions
-        for i in 0..bucket_count {
+        for bucket in buckets.iter_mut().take(bucket_count) {
             unsafe {
-                let bucket_deltas = &mut buckets[i].deltas as *mut AtomicU8;
+                let bucket_deltas = &mut bucket.deltas as *mut AtomicU8;
                 std::ptr::write_bytes(bucket_deltas, 0, 8);
             };
 
             for cell in 0..4 {
                 unsafe {
-                    let cell_hash = &mut buckets[i].cells[cell].hash as *mut AtomicHashedKey;
+                    // We only need to write the hash as null, an can ignore th key.
+                    let cell_hash = &mut bucket.cells[cell].hash as *mut AtomicHashedKey;
                     std::ptr::write_bytes(cell_hash, 0, 1);
-
-                    // FIXME: Might need to add this:
-                    //let cell_key = &mut buckets[i].cells[cell].hash as *mut K;
-                    //std::ptr::write_bytes(cell_key, 0, 1);
                 };
 
-                // FIXME: We should check if the stored type is directly writable ..
-                let cell_value = &mut buckets[i].cells[cell].value;
+                // FIXME: Check if the stored type is directly writable ..
+                let cell_value = &mut bucket.cells[cell].value;
                 *cell_value = Atomic::new(V::null());
             }
         }
@@ -1254,8 +1241,8 @@ impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
             migrator.cleanup_stale_table(&self.allocator);
         }
 
-        // We don't need to deallocate the buckets for the migrator, since that
-        // has already been handled.
+        // We don't need to deallocate the buckets for the migrator. It has
+        // alredy been handled.
         let migrator_ptr = self.migrator.load(Ordering::SeqCst);
         deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
     }
@@ -1350,6 +1337,29 @@ const fn get_cell_index(index: usize) -> usize {
     index & 3
 }
 
+/// The type used for hashed keys.
+type HashedKey = u64;
+
+/// The atomic type of the hashed key.
+type AtomicHashedKey = AtomicU64;
+
+/// Result types when an insert into a [LeapMap].
+pub(super) enum ConcurrentInsertResult<V> {
+    /// The insertion found a cell for the key, replaced the old value with
+    /// a new one, and returned the old value.
+    Replaced(V),
+    /// The insertion was performed with a new key, so a new cell was filled.
+    NewInsert,
+    /// The insertion found a cell whose value was stale, so the map data needs
+    /// to be migrated, after which the value should be inserted into the migrated
+    /// map.
+    Migration(V),
+    /// No new cell was found for the key withing the linear search range,
+    /// so we overflowed the max delta value and need to move the map to
+    /// a larger table.
+    Overflow(usize),
+}
+
 /// Underlying table for a [LeapMap]. This stores a pointer to the buckets and
 /// the mask for the number of cells which are stored in the table.
 struct Table<K, V> {
@@ -1390,12 +1400,6 @@ pub struct AtomicCell<K, V> {
     pub(crate) key: Atomic<K>,
     /// The value assosciated with the hash.
     pub(crate) value: Atomic<V>,
-}
-
-impl<K, V> AtomicCell<K, V> {
-    fn is_empty(&self) -> bool {
-        self.hash.load(Ordering::Relaxed) == null_hash()
-    }
 }
 
 /// Struct which stores buckets of cells. Each bucket stores four cells

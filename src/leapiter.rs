@@ -7,7 +7,7 @@ use crate::LeapMap;
 use crate::Value;
 use crate::{leapmap::null_hash, Ref, RefMut};
 
-/// Iterator over a [`LeaphMap`] which yields key-value pairs.
+/// Iterator over a [`LeapMap`] which yields key-value pairs.
 ///
 /// # Examples
 ///

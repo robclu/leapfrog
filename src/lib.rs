@@ -1,60 +1,60 @@
-//! A lock-free concurrent hash table which uses leapfrog probing.
+//! A concurrent hash table which uses leapfrog probing. This map is also lock-free
+//! **if** the key and value support atomic operations. If not, an efficient spin-lock
+//! is used instead.
 //!
-//! As described below, the implementations of these maps do not store the keys
-//! but rather hashes of the keys. While this provides good performance, if there
-//! is a hash collision (different keys produce the same hash) then inserting
-//! with one key will replace the data of the other key (which should not happen).
-//! Therefore, in their current form, these are only usable as replacements for
-//! other hash map implementations *if the described behaviour is acceptable or
-//! if it is known that the hash function does not produce collisions*.
+//! All operations on a [`LeapMap`] can be used concurrently with each other, and
+//! the map is both fast and scalable up to many threads. The interface for the map
+//! has been kept as close as possible to `std::collections::HashMap`, however,
+//! there are some differences to ensure that concurrent operations are always correct
+//! without decreasing performance.
 //!
-//! All map operations can be used fuilly concurrently, and is both efficient
-//! and scalable up to many threads. If the value type for the map supports atomic
-//! operations then this map will not lock, while if the value type does not support atomic
-//! operations then accessing the value uses an efficient spinlock implementation.
-//! The interface for the map has been kept as close as possible to
-//! `std::collections::HashMap`, however, there are some differences to ensure
-//! that concurrent operations are always correct and efficient.
-//!
-//! The biggest differences between the interface of this map and the
-//! `std::collections::HashMap`, is the types returned by (LeapMap::get) and
-//! [LeapMap::get_mut]. These methods return [`Ref`] and [`RefMut`] types,
-//! respectively, which have interfaces to allow for accessing the cells returned
-//! by the get calls, concurrently and correctly. As a result, it is not possible
-//! to get a reference to the cell's value, since the cell value type is atomic.
-//! The value can be accessed with `value()` for [`Ref`] and [`RefMut`] types, or
-//! can be set with `set_value()`, or updated with `update`, for [`RefMut`] types.
-//! These interfaces ensure that the most up to date value is loaded/stored/updated,
-//! and that if the referenced cell is invalidated or erased by other threads,
-//! the reference [`Ref`]/[`RefMut`] type is updated appropriately. These interfaces
-//! are designed to ensure that using the map does not require thinking about
-//! concurrency.
+//! The biggest differences between the interface of the [`LeapMap`] and the
+//! `std::collections::HashMap` are the types returned by `get` and `get_mut`.
+//! For the [`LeapMap`], these methods return [`Ref`] and [`RefMut`] types,
+//! respectively, whose interfaces are designed to allow for accessing the cells
+//! returned by the those methods concurrently and correctly. As a result, it is
+//! not possible to get a reference to a cell's value, since the cell value type
+//! is atomic. The cell's key, value, and key-value pairs can be accessed with
+//! `key`, `value`, and `key_value` methods, respectively for [`Ref`] and
+//! [`RefMut`] types. For the [`RefMut`] type, the value can additionally be
+//! modified with `set_value` or `update`. These interfaces ensure that the most
+//! up to date value is loaded/stored/updated, and that if the referenced cell is
+//! invalidated/updated/erased by other threads, the [`Ref`]/[`RefMut`] type is
+//! updated appropriately. This makes working concurrently with the map simple,
+//! without sacrificing performance.
 //!
 //! The map uses [leapfrog probing](https://preshing.com/20160314/leapfrog-probing/)
 //! which is similar to [hopscotch hashing](https://en.wikipedia.org/wiki/Hopscotch_hashing)
 //! since it is based off of it. Leapfrog probing stores two offset per
-//! cell which are used to efficiently traverse a local neighbourhood of values
+//! cell which are used to traverse a local neighbourhood of values
 //! around the cell to which a key hashes. This makes the map operations cache
-//! friendly and scalable, even under heavy contention.
+//! friendly and scalable, even under heavy contention. Keys are also stored,
+//! and to allow the [`LeapMap`] to still be efficient the hash of a key is also
+//! stored, which adds 8 bytes of overhead per key-value pair. This can very likely
+//! be improved, but this map is still in its early stages. The [`LeapMap`] is
+//! designed for performance so if memory efficiency is more important, a different
+//! map is likely a better choice.
 //!
 //! # HashMap
 //!
-//! This crate also provides [`HashMap`], which is an efficient single-threaded
+//! This crate also provides [`HashMap`], which is an fast single-threaded
 //! version of the concurrent lock-free hash map, whose performance is roughly
-//! 1.2-1.5x the hash map implementation in the standard library, when using *the
-//! same* hash function as the default hash function in the standard library.
-//! The tradeoff that is currently made to enable this performance is increased
-//! memory use, since the map stores the offsets (8 bytes) and the hashed value
-//! for a key (8 bytes). This may make the map unsuitable for some use cases.
+//! 1.2-1.5x the hash map implementation in the standard library, when using the
+//! same hash function. The tradeoff that is currently made to enable this performance
+//! is increased memory use, since the map stores the offsets (8 bytes) and the
+//! hashed value for a key (8 bytes). This may make the map unsuitable for some
+//! use cases.
 //!
 //! # Hash Functions
 //!
-//! By default, the default hash function from the standard library is used, which
-//! is DOS resistant, but is more expensive to evaluate. The [`MurmurHasher`] can
-//! be used instead, which is quite a bit faster but which is *not* DOS resistant.
-//! Additionally, the default initialization of the [`HashMap`] data requires that
+//! By default, the default hash function from the standard library is used for
+//! both the [`HashMap`] and the [`LeapMap`], since it is DOS resistant. It is,
+//! however, more expensive to evaluate. The [`MurmurHasher`] can be used instead,
+//! which is quite a bit faster but which is **not** DOS resistant. Additionally, the
+//! default initialization of the [`HashMap`] and [`LeapMap`] data requires that
 //! 0 not be used as a key for the map *if the [`MurmurHasher`] is used*. With the
-//! default hasher this limitation does not apply.
+//! default hasher this limitation does not apply. Any other hash functions can
+//! be used by creating the maps with `with_hasher` or `with_capacity_and_hasher`.
 //!
 //! # Performance
 //!
@@ -63,7 +63,9 @@
 //! A snapshot of the results for a read heavy workload are the following (with
 //! throughput in Mops/second, cores in brackets, and performance realtive to
 //! `std::collections::HashMap` with RwLock). While these benchmarks show good
-//! performance, *please take note of the limitations described above*.
+//! performance, **please take note of the limitations described above**, and
+//! benchmark for your use case. Please also create an issue if there are either
+//! correctness or performance problems for a specific use case.
 //!
 //! | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
 //! |------------------|----------------|--------------|-----------------|---------------|
@@ -72,69 +74,55 @@
 //! | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
 //! | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
 //!
-//! Where [`LeapMap`] is performance limited is when rapidly growing the map, since
-//! the bottleneck then becomes the resizing and migration operations. The map
-//! *is not* designed to be resized often (resizing infrequently has very little
-//! impact on performance), so it's best to use an initial capacity which is close
-//! to the expected maximum number of elements for the table. The growing performace
-//! is approximately equivalent to DashMap's growing performance, so is still good,
-//! but will definitely become the bottleneck if resizing is frequent.
+//! The performance of the [`LeapMap`] is limited is when rapidly growing the map, since
+//! the bottleneck then becomes the resizing (allocation) and migration operations.
+//! The map **is not** designed to be resized often (resizing infrequently has very
+//! little impact on performance, however), so it's best to use an initial capacity
+//! which is close to the expected maximum number of elements for the map. The growing
+//! performace is slightly worse than DashMap's growing performance (see the
+//! benchmarks). If resizing is frequent, this map is currently not the best choice,
+//! however, this can be improved by using a more efficient allocator.
 //!
 //! # Consistency
 //!
 //! All operations on a [`LeapMap`] map are non-blocking, and accessing/updating
-//! a value in the map will not lock *if the value type has built-in atomic support*.
+//! a value in the map will not lock **if the value type has built-in atomic support**.
+//! The map can be iterated (mutable or immutably) from multiple threads while
+//! concurrently calling the operations directly on the map from other threads.
 //!
 //! # Limitations
 //!
-//! Every design has tradeoffs, and there are some limitations for this map as
-//! well.
-//!
-//! The primary limitation of the map is that it does not store keys, but rather
-//! hashes of the keys. See the
-//!
-//! *You should use a hasher which produces unique hashes for each key*. As only
-//! hashes are stored, if two keys hash to the same hash then the value for the
-//! keys which hash to the same value my be overwritten by each other. The
-//! [`MurmurHasher`] is the default hasher, and has been found to be efficient
-//! and passed all stress tests. The built in hasher and
-//! [fxhash](https://docs.rs/fxhash/latest/fxhash/) have also passed all
-//! stress tests. These hashers are not DOS resistant, so if that is required
-//! then it's best to use the default hasher from the standard library. *This
-//! currently only applied to the [`LeapMap`], not the [`HashMap`]*.
-//!
-//! See the first section for limitations relating to the types returned by
-//! [`LeapMap::get`] and [`LeapMap::get_mut`].
-//!
 //! Getting the length of the map does not return the length of the map, but rather an
 //! estimate of the length, unless the calling thread is the only thread operating
-//! on the map, and therefore that there are no other readers or writers. Additionally,
+//! on the map, and therefore there are no other readers or writers. Additionally,
 //! the length is expensive to compute since it is not tracked as insertions and
 //! removals are performed. The overhead of doing so when under contention
 //! was found to be significant during benchmarking, and given that it's only an
 //! estimate, it's not worth the cost.
 //!
+//! The same applies for `is_empty`.
+//!
 //! The size of the map must always be a power of two. This is handled internally
 //! and may change in the future to improve memory efficiency.
 //!
 //! The value type for the map needs to implement the [`Value`] trait, which is
-//! simple enough to implement, however, two values need to be chosen, one as a
-//! null value and another as a redirect value. For integer types, MAX and MAX-1
-//! are used respectively. A good choice should be values which are efficient for
-//! comparison, so for strings, a single character which will not be used as the
-//! first character for any valid string would be a good choice (i.e a single number
-//! or special character when the strings won't begin with those).
+//! simple enough to implement, however, two values need to be chosen: one as a
+//! null value and another as a redirect value. For integer types MAX and MAX-1
+//! are used respectively. A good choice is values which are efficient for
+//! comparison.
 //!
 //! # Resizing
 //!
 //! The buckets for the map are expanded when an insertion would result in a
-//! offset which would overflow the maximum probe offset (i.e, when it's not
+//! offset which would overflow the maximum probe offset (i.e when it's not
 //! possible to find an empty cell within the probe neighbourhood), or shrunk
 //! when probes are too far apart. The resizing and subsequent removal of buckets
 //! from the old table to the new table will happen concurrently when multiple
-//! threads are attempting to modify the map concurrently, which makes the reszing
+//! threads are attempting to modify the map, which makes the reszing
 //! efficient. Despite this, it is best to choose a larger size where possible,
-//! since it will ensure more stable performance of inserts and gets.
+//! since it will ensure more stable performance of map operations. When the table
+//! is resized, the old memory is cleanup up using what is essentially a quescient
+//! based reclaimation strategy.
 //!
 //! # Features
 //!
@@ -143,15 +131,18 @@
 #![feature(allocator_api)]
 #![feature(const_fn_trait_bound)]
 
+mod hashiter;
 pub mod hashmap;
-mod hashmap_iter;
-pub mod leapiter;
+mod leapiter;
 pub mod leapmap;
 pub mod leapref;
 pub mod util;
 
 #[cfg(feature = "serde")]
 mod hashmap_serde;
+
+#[cfg(feature = "serde")]
+mod leapmap_serde;
 
 use crate::util::load_u64_le;
 use std::borrow::Borrow;

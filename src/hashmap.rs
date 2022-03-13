@@ -1,4 +1,4 @@
-use crate::hashmap_iter::{Iter, IterMut, OwnedIter};
+use crate::hashiter::{Iter, IterMut, OwnedIter};
 use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
 use crate::{make_hash, Value};
 use core::alloc::Allocator;
@@ -9,88 +9,8 @@ use core::{
 };
 use std::alloc::Global;
 
-/// The type used for hashed keys.
-pub(crate) type HashedKey = u64;
-
-/// The default haser for the map.
+/// The default hasher for a [`HashMap`].
 pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
-
-/// Struct which stores a cell in a hash map. A cell is simply a hash (rather
-/// than the key iteself) and the value associated with the key for which the
-/// hash is associated.
-pub(crate) struct Cell<K, V> {
-    /// The hashed value of the cell. This adds 8 bytes of overhead to per key-value
-    /// pair for the cell, which is a lot, but it improves performance, so we
-    /// make the tradeoff.
-    /// FIXME: Reduce this overhead ...
-    hash: HashedKey,
-    // The key for the cell.
-    pub(crate) key: K,
-    /// The value assosciated with the hash.
-    pub(crate) value: V,
-}
-
-impl<K, V> Cell<K, V> {
-    /// Returns true if the cell is empty.
-    pub fn is_empty(&self) -> bool {
-        self.hash == null_hash()
-    }
-}
-
-/// Underlying table for a [HashMap]. This stores a pointer to the buckets and
-/// the mask for the number of cells which are stored in the table.
-struct Table<K, V> {
-    /// Pointer to the buckets for the table.
-    buckets: *mut Bucket<K, V>,
-    /// The mask for indexing into the buckets.
-    size_mask: usize,
-}
-
-impl<K, V> Table<K, V> {
-    /// Gets a mutable slice of the table buckets.
-    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
-    }
-
-    /// Gets a slice of the table buckets.
-    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
-    }
-
-    /// Returns the number of cells in the table.
-    pub fn size(&self) -> usize {
-        self.size_mask + 1
-    }
-}
-
-/// Struct which stores buckets of cells. Each bucket stores four cells
-/// and two delta values per cell. The first delta value for a cell provides
-/// the offset to the cell which is the start of the probe chain for the cell.
-/// The second delta value provides the offset to the next link in the probe
-/// chain once a search along the probe chain has started.
-struct Bucket<K, V> {
-    /// Delta values for the cells. The first 4 values are the delta values to
-    /// the start of the probe chain, and the second 4 values are the delta
-    /// values to the next probe in the chain, for each cell, respectively.
-    deltas: [u8; 8],
-    /// Cells for the bucket.
-    cells: [Cell<K, V>; 4],
-    /// Placeholder for the key
-    _key: std::marker::PhantomData<K>,
-}
-
-/// Defines the result of an insert into the [HashMap].
-enum InsertResult<V> {
-    /// The insertion found a cell for the key, replaced the old value with
-    /// a new one, and returned the old value.
-    Found(V),
-    /// The insertion was performed with a new key, so a new cell was filled.
-    NewInsert,
-    /// No new cell was found for the key withing the linear search range,
-    /// so we overflowed the max delta value and need to move the map to
-    /// a larger table.
-    Overflow(usize),
-}
 
 /// A [`HashMap`] implementation which uses a modified form of RobinHood/Hopscotch
 /// probing. This implementation is efficient, roughly 2x the performance of
@@ -924,4 +844,84 @@ where
 #[inline]
 pub(crate) const fn null_hash() -> HashedKey {
     0_u64
+}
+
+/// The type used for hashed keys.
+pub(crate) type HashedKey = u64;
+
+/// Struct which stores a cell in a hash map. A cell is simply a hash (rather
+/// than the key iteself) and the value associated with the key for which the
+/// hash is associated.
+pub(crate) struct Cell<K, V> {
+    /// The hashed value of the cell. This adds 8 bytes of overhead to per key-value
+    /// pair for the cell, which is a lot, but it improves performance, so we
+    /// make the tradeoff.
+    /// FIXME: Reduce this overhead ...
+    hash: HashedKey,
+    // The key for the cell.
+    pub(crate) key: K,
+    /// The value assosciated with the hash.
+    pub(crate) value: V,
+}
+
+impl<K, V> Cell<K, V> {
+    /// Returns true if the cell is empty.
+    pub fn is_empty(&self) -> bool {
+        self.hash == null_hash()
+    }
+}
+
+/// Underlying table for a [HashMap]. This stores a pointer to the buckets and
+/// the mask for the number of cells which are stored in the table.
+struct Table<K, V> {
+    /// Pointer to the buckets for the table.
+    buckets: *mut Bucket<K, V>,
+    /// The mask for indexing into the buckets.
+    size_mask: usize,
+}
+
+impl<K, V> Table<K, V> {
+    /// Gets a mutable slice of the table buckets.
+    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+    }
+
+    /// Gets a slice of the table buckets.
+    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+    }
+
+    /// Returns the number of cells in the table.
+    pub fn size(&self) -> usize {
+        self.size_mask + 1
+    }
+}
+
+/// Struct which stores buckets of cells. Each bucket stores four cells
+/// and two delta values per cell. The first delta value for a cell provides
+/// the offset to the cell which is the start of the probe chain for the cell.
+/// The second delta value provides the offset to the next link in the probe
+/// chain once a search along the probe chain has started.
+struct Bucket<K, V> {
+    /// Delta values for the cells. The first 4 values are the delta values to
+    /// the start of the probe chain, and the second 4 values are the delta
+    /// values to the next probe in the chain, for each cell, respectively.
+    deltas: [u8; 8],
+    /// Cells for the bucket.
+    cells: [Cell<K, V>; 4],
+    /// Placeholder for the key
+    _key: std::marker::PhantomData<K>,
+}
+
+/// Defines the result of an insert into the [HashMap].
+enum InsertResult<V> {
+    /// The insertion found a cell for the key, replaced the old value with
+    /// a new one, and returned the old value.
+    Found(V),
+    /// The insertion was performed with a new key, so a new cell was filled.
+    NewInsert,
+    /// No new cell was found for the key withing the linear search range,
+    /// so we overflowed the max delta value and need to move the map to
+    /// a larger table.
+    Overflow(usize),
 }

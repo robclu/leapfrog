@@ -201,7 +201,6 @@ fn generate_kvs(keys: usize) -> BTreeMap<u64, u64> {
     map
 }
 
-// Very basic, validate the single threaded iteration works.
 #[test]
 fn leapmap_into_iter() {
     const KEYS: usize = 150;
@@ -229,7 +228,6 @@ fn leapmap_into_iter() {
     assert_eq!(count, KEYS);
 }
 
-// Very basic, validate the single threaded iteration works.
 #[test]
 fn leapmap_iter() {
     const KEYS: usize = 150;
@@ -257,4 +255,41 @@ fn leapmap_iter() {
     }
 
     assert_eq!(count, KEYS);
+}
+
+#[test]
+fn leapmap_iter_mut() {
+    const KEYS: usize = 150;
+    let map = LeapMap::new();
+    let kv_map = generate_kvs(KEYS);
+
+    for (k, v) in kv_map.iter() {
+        let val = *v;
+        let key = *k;
+        map.insert(key, val);
+    }
+
+    assert_eq!(map.len(), KEYS);
+
+    let mut count = 0usize;
+    for mut item in map.iter_mut() {
+        let k = item.key().unwrap();
+        let old = item.update(|v| {
+            *v *= 2;
+        });
+        assert_eq!(*kv_map.get(&k).unwrap(), old.unwrap());
+        count += 1;
+    }
+    assert_eq!(count, KEYS);
+
+    for mut item in map.iter() {
+        let (k, v) = item.key_value().unwrap();
+
+        if let Some(val) = kv_map.get(&k) {
+            assert_eq!(v, *val * 2);
+        } else {
+            panic!("LeapMap value is incorrect");
+        }
+        count += 1;
+    }
 }

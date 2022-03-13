@@ -246,6 +246,19 @@ where
     /// Updates the value for the referenced cell, using the `func` to compute
     /// the new value, returning the old value if the cell is still in the map,
     /// and `None` if the cell has been deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = leapfrog::LeapMap::new();
+    /// map.insert(1, 12);
+    /// if let Some(mut kv_ref) = map.get_mut(&1) {
+    ///     kv_ref.update(|mut v| {
+    ///         *v += 1;    
+    ///     });
+    /// }
+    ///
+    /// assert_eq!(map.get(&1).unwrap().value(), Some(13));
     pub fn update<F>(&mut self, mut func: F) -> Option<V>
     where
         K: Eq + Hash + Copy,
