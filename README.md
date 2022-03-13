@@ -4,47 +4,36 @@
 # Leapfrog
 
 The leapfrog crate contains two hash map implementations, `HashMap`, which is
-a single-threaded HashMap, and `LeapMap`, which is fast, lock-free concurrent 
+a single-threaded HashMap, and `LeapMap`, which is fast, concurrent 
 version of the `HashMap`, where all operations can be performed concurrently 
-from any number of threads. **These hash map implementations are still in 
-development**, and have limitations which other hash maps do not have. Specifically,
-only hashes of the keys are stored in the current implementation, therefore when there is a collision 
-in the hash then that data will be overwritten. The probability of a collision depends
-on the hasher and the number of elements in the hash map, so the suitability of the
-hash maps in their current form is problem dependent. **They can only be used as a drop
-in replacement for Rust's HashMap if is known that the hash will not produce a collision**.
-The next version of the maps will remove this limitation.
+from any number of threads. If the key and value types support atomic operations
+then the map is lock-free, and when there is no atomic support for either the key
+or value, then operations within the map on that non-atomic type use an efficient
+spinlock and the locking is very fine-grained.
 
-For such use cases, the performance for most real-world use cases is 
-around 2x the next fastest Rust hash map implementation, and around 13.6x 
-`std::collections::HashMap` wrapped with RwLock for 16
-cores. It also scales better than other hash map implementations. Benchmark results 
+The performance of both maps is good on the benchmarks it's been tested on. The
+`HashMap` is between 1.2 and 1.5x the `std::collections::HashMap`. Compared to
+`RwLock<HashMap>`, on 16 cores the `LeapMap` is around 13.5x faster. It also
+scales very well up to high core counts, for multiple workloads.  Benchmark results 
 can be found at [rust hashmap benchmarks](https://github.com/robclu/conc-map-bench).
-These bechmarks, however, are limited in the use cases that they cover (the above
-mentioned limitations were not encountered when running any of these benchmarks), and 
-should be extended to cover a much wider scope. Nevertheless, for those bechamarks,
-these maps are the fastest. Please see the crate documentation for more details.
+These bechmarks, however, are limited in the use cases that they cover, and 
+should be extended to cover a much wider scope. Nevertheless, for those bechmarks,
+the `LeapMap` is the fastest map. 
 
-**If the value type for the map supports atomic operations then this map will not 
-lock, while if the value type does not support atomic perations then accessing the 
-value uses an efficient spinlock implementation.**
+For more details on the API and the differences compared to `std::collections::HashMap`,
+please see the crate documentation.
 
-In their current form, while the API is similar to the `std` HashMap implementation,
-these maps are not drop-in replacements for the `HashMap`, `RwLock<HashMap>`, `DashMap`,
-etc.
+# Recent Changes
 
-# Planned Extensions
+The implementations of these maps have recently been updated to store keys, so the API
+for both is much closer to `std::collections::HashMap`. There is now also support for
+serde with the optional "serde" feature. The maps also now have iterator support. The
+default hasher has been changed to be the DOS resistant hasher from the standard library.
 
-Based on feedback, not storing the keys introduces problems for many use cases. However,
-for the cases where such a limitation is acceptable for increased performance, I plan
-on keeping the `LeapMap` as is, and adding support for iterators, rayon, serde, and any 
-other requested features, as well as a `LeapSet`.
+# Current Limitations
 
-I am currently working on adding a map which uses the same probing strategy, but which 
-does store keys and therefore doesn't have the presented limitations. This wont be as 
-fast as the `LeapMap`, but should be a drop-in replacement for
-other maps (with hopefully better performance). I will also add a `Set` version of that,
-with the same support as the mentioned above.
+These is not yet support for rayon, but it will be added next. There are also no set
+versions of the maps, which are also planned next.
 
 # Performance
 
@@ -59,24 +48,21 @@ and  performance realtive to `std::collections::HashMap` with RwLock):
 | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
 | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
 
-For the single threaded leapfrog HashMap, a benchmark of random inserts and deletes (a port of
+For the single threaded leapfrog `HashMap`, a benchmark of random inserts and deletes (a port of
 [this](https://martin.ankerl.com/2019/04/01/hashmap-benchmarks-03-03-result-RandomInsertErase/)
-benchmark of C++ hashmaps) has the rust std HashMap at around 57Mops/s and
-the leapfrog HashMap at around 80Mops/s, with Murmur as the hash function. The
-leapfrog HashMap has performance which is at least comparable to, if not better
-than, the fastest C++ hash maps from the linked benchmark.
+benchmark of C++ hashmaps) has the rust std HashMap at around 40Mops/s and
+the leapfrog HashMap at around 50Mops/s, with default hasher from the standard library,
+which are competitive with the C++ hash maps from the linked benchmark.
 
 # Probing
 
 Both maps use the same leapfrog probing strategy, for which you can find more
 information on Jeff Preshing's [leapfrog probing blog post](https://preshing.com/20160314/leapfrog-probing/),
 A c++ implementation of the map can be found at his [Junction library](https://github.com/preshing/junction),
-which was the starting point for this implementation.
-
-# Additional Notes
-
-For a more detailed description of the limitations and behaviour of the maps,
-see the crate documentation: 
+which was the starting point for this implementation. Those maps don't have support for keys and
+therefore collisions, which these maps do. The probing strategy requires 8 bytes per key-value pair
+and and additional 8 bytes are stored for the hashed key so that it doesn't have to be rehashed for
+comparisons.
 
 # License
 
