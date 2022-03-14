@@ -29,23 +29,20 @@ where
         1 => {
             let v = v | (v >> T::from(1));
             let v = v | (v >> T::from(2));
-            let v = v | (v >> T::from(4));
-            v
+            v | (v >> T::from(4))
         }
         2 => {
             let v = v | (v >> T::from(1));
             let v = v | (v >> T::from(2));
             let v = v | (v >> T::from(4));
-            let v = v | (v >> T::from(8));
-            v
+            v | (v >> T::from(8))
         }
         4 => {
             let v = v | (v >> T::from(1));
             let v = v | (v >> T::from(2));
             let v = v | (v >> T::from(4));
             let v = v | (v >> T::from(8));
-            let v = v | (v >> T::from(16));
-            v
+            v | (v >> T::from(16))
         }
         8 => {
             let v = v | (v >> T::from(1));
@@ -53,8 +50,7 @@ where
             let v = v | (v >> T::from(4));
             let v = v | (v >> T::from(8));
             let v = v | (v >> T::from(16));
-            let v = v | (v >> T::from(32));
-            v
+            v | (v >> T::from(32))
         }
         _ => v,
     };
