@@ -1,5 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use core_affinity::CoreId;
+use leapfrog::util::round_to_pow2;
 use leapfrog::{LeapMap, Value};
 use rand::{thread_rng, Rng};
 use std::collections::BTreeMap;
@@ -18,7 +19,7 @@ fn create_map() {
         let map = leapmap.clone();
         threads.push(std::thread::spawn(move || {
             core_affinity::set_for_current(CoreId { id: 0 });
-            assert_eq!(map.capacity(), ELEMENTS);
+            assert_eq!(map.capacity(), round_to_pow2(ELEMENTS));
         }));
     }
 

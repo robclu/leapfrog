@@ -95,6 +95,11 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
     fn get_table_mut(&self, ordering: Ordering) -> &'a mut Table<K, V> {
         unsafe { &mut *self.table.load(ordering) }
     }
+
+    /// Returns true if the table has been allocated.
+    fn is_allocated(&self) -> bool {
+        !self.table.load(Ordering::Relaxed).is_null()
+    }
 }
 
 impl<K, V> LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global>
@@ -174,6 +179,7 @@ where
         let migrator = unsafe { &mut *migrator_ptr };
         migrator.initialize();
 
+        let capacity = round_to_pow2(capacity.max(Self::INITIAL_SIZE));
         let table_ptr = Self::allocate_and_init_table(&allocator, capacity);
         LeapMap {
             table: AtomicPtr::new(table_ptr),
@@ -1226,25 +1232,25 @@ where
 
 impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
     fn drop(&mut self) {
-        let table = self.get_table_mut(Ordering::SeqCst);
+        if self.is_allocated() {
+            let table = self.get_table_mut(Ordering::SeqCst);
 
-        let bucket_ptr = table.buckets;
-        let bucket_count = table.size() >> 2;
-        deallocate::<Bucket<K, V>, A>(&self.allocator, bucket_ptr, bucket_count);
+            let bucket_ptr = table.buckets;
+            let bucket_count = table.size() >> 2;
+            deallocate::<Bucket<K, V>, A>(&self.allocator, bucket_ptr, bucket_count);
 
-        let table_ptr = self.table.load(Ordering::Relaxed);
-        deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
-
-        let migrator_ptr = self.migrator.load(Ordering::SeqCst);
-        let migrator = unsafe { &*migrator_ptr };
-        while migrator.stale_tables_remaining() > 0 {
-            migrator.cleanup_stale_table(&self.allocator);
+            let table_ptr = self.table.load(Ordering::Relaxed);
+            deallocate::<Table<K, V>, A>(&self.allocator, table_ptr, 1);
         }
 
-        // We don't need to deallocate the buckets for the migrator. It has
-        // alredy been handled.
         let migrator_ptr = self.migrator.load(Ordering::SeqCst);
-        deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
+        if !migrator_ptr.is_null() {
+            let migrator = unsafe { &*migrator_ptr };
+            while migrator.stale_tables_remaining() > 0 {
+                migrator.cleanup_stale_table(&self.allocator);
+            }
+            deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
+        }
     }
 }
 

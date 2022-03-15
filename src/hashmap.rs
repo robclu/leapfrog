@@ -31,8 +31,8 @@ pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 ///
 /// # Threading
 ///
-/// This version is *not* thread-safe. [crate::LeapMap] is a thread-safe version of the
-/// map.
+/// This version is *not* thread-safe. [`LeapMap`] is a thread-safe version of
+/// the map.
 pub struct HashMap<K, V, H = BuildHasherDefault<DefaultHash>, A: Allocator = Global> {
     /// Table for the map.
     table: *mut Table<K, V>,
@@ -60,6 +60,11 @@ impl<'a, K, V, H, A: Allocator> HashMap<K, V, H, A> {
     /// `ordering` to load the table reference.
     fn get_table_mut(&self) -> &'a mut Table<K, V> {
         unsafe { &mut *self.table }
+    }
+
+    /// Returns true if the hash map has been allocated.
+    fn is_allocated(&self) -> bool {
+        !self.table.is_null()
     }
 }
 
@@ -132,7 +137,7 @@ where
         builder: H,
         allocator: A,
     ) -> HashMap<K, V, H, A> {
-        let capacity = round_to_pow2(capacity.max(4));
+        let capacity = round_to_pow2(capacity.max(Self::INITIAL_SIZE));
         let table = Self::allocate_and_init_table(&allocator, capacity);
         HashMap {
             table,
@@ -173,6 +178,7 @@ where
         key.hash(&mut state);
         let hash = state.finish();
         debug_assert!(hash != null_hash());
+        println!("{:?} {:?}", key, hash);
         loop {
             let size_mask = self.get_table().size_mask;
             let buckets = self.get_table_mut().bucket_slice_mut();
@@ -799,6 +805,10 @@ where
 
 impl<K, V, H, A: Allocator> Drop for HashMap<K, V, H, A> {
     fn drop(&mut self) {
+        if !self.is_allocated() {
+            return;
+        }
+
         let table = self.get_table_mut();
 
         let bucket_ptr = table.buckets;
