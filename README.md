@@ -43,10 +43,10 @@ and  performance realtive to `std::collections::HashMap` with RwLock):
 
 | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
 |------------------|----------------|--------------|-----------------|---------------|
-| RwLock + HashMap | 17.6           | 1.0          | 12.3            | 0.69          |
-| Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
-| DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
-| LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
+| RwLock + HashMap | 19.4           | 1.0          | 11.7            | 0.60          |
+| Flurry           | 11.2           | 0.58         | 80.8            | 4.16          |
+| DashMap          | 14.1           | 0.72         | 87.5            | 4.51          |
+| LeapMap          | 17.8           | 0.92         | 148.0           | 7.62          |
 
 For the single threaded leapfrog `HashMap`, a benchmark of random inserts and deletes (a port of
 [this](https://martin.ankerl.com/2019/04/01/hashmap-benchmarks-03-03-result-RandomInsertErase/)

@@ -65,15 +65,17 @@
 //! `std::collections::HashMap` with RwLock). While these benchmarks show good
 //! performance, **please take note of the limitations described above**, and
 //! benchmark for your use case. Please also create an issue if there are either
-//! correctness or performance problems for a specific use case.
+//! correctness or performance problems for a specific use case. For a read heavy
+//! workload on 16 cores the following was benchmarked:
 //!
 //! | Map              | Throughput (1) | Relative (1) | Throughput (16) | Relative (16) |
 //! |------------------|----------------|--------------|-----------------|---------------|
-//! | RwLock + HashMap | 17.6           | 1.0          | 12.3            | 0.69          |
-//! | Flurry           | 10.2           | 0.58         | 76.3            | 4.34          |
-//! | DashMap          | 14.1           | 0.80         | 84.5            | 4.8           |
-//! | LeapMap          | 16.8           | 0.95         | 167.8           | 9.53          |
+//! | RwLock + HashMap | 19.4           | 1.0          | 11.7            | 0.60          |
+//! | Flurry           | 11.2           | 0.58         | 80.8            | 4.16          |
+//! | DashMap          | 14.1           | 0.72         | 87.5            | 4.51          |
+//! | LeapMap          | 17.8           | 0.92         | 148.0           | 7.62          |
 //!
+//! On an exchange heavy benchmark, the leapmap was even faster.
 //! The performance of the [`LeapMap`] is limited is when rapidly growing the map, since
 //! the bottleneck then becomes the resizing (allocation) and migration operations.
 //! The map **is not** designed to be resized often (resizing infrequently has very
