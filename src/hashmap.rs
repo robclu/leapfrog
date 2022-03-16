@@ -178,7 +178,6 @@ where
         key.hash(&mut state);
         let hash = state.finish();
         debug_assert!(hash != null_hash());
-        println!("{:?} {:?}", key, hash);
         loop {
             let size_mask = self.get_table().size_mask;
             let buckets = self.get_table_mut().bucket_slice_mut();
