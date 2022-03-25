@@ -276,7 +276,7 @@ fn leapmap_iter_mut() {
     for mut item in map.iter_mut() {
         let k = item.key().unwrap();
         let old = item.update(|v| {
-            *v *= 2;
+            *v += 2;
         });
         assert_eq!(*kv_map.get(&k).unwrap(), old.unwrap());
         count += 1;
@@ -287,7 +287,7 @@ fn leapmap_iter_mut() {
         let (k, v) = item.key_value().unwrap();
 
         if let Some(val) = kv_map.get(&k) {
-            assert_eq!(v, *val * 2);
+            assert_eq!(v, *val + 2);
         } else {
             panic!("LeapMap value is incorrect");
         }

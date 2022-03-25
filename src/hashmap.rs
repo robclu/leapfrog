@@ -9,6 +9,9 @@ use core::{
 };
 use std::alloc::Global;
 
+// Re export the entry api.
+pub use crate::hashentry::{Entry, OccupiedEntry, VacantEntry};
+
 /// The default hasher for a [`HashMap`].
 pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 
@@ -170,10 +173,7 @@ where
     /// assert_eq!(map.insert(37, 12), None);
     /// assert_eq!(map.insert(37, 14), Some(12));
     /// ```
-    pub fn insert(&mut self, key: K, value: V) -> Option<V>
-    where
-        K: std::fmt::Debug,
-    {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let mut state = self.hash_builder.build_hasher();
         key.hash(&mut state);
         let hash = state.finish();
@@ -275,6 +275,38 @@ where
         Q: Hash + Eq,
     {
         self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
+    }
+
+    /// Gets the given key's corresponding entry in the map for in-place manipulation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut map = leapfrog::HashMap::<i32, i32>::new();
+    ///
+    /// map.insert(1, 10);
+    /// map.insert(2, 20);
+    ///
+    /// for i in 1..5 {
+    ///     let value = map.entry(i).or_insert(i * 10);
+    ///     *value += 1;
+    /// }
+    ///
+    /// assert_eq!(map.get(&1), Some(&11));
+    /// assert_eq!(map.get(&2), Some(&21));
+    /// assert_eq!(map.get(&3), Some(&31));
+    /// assert_eq!(map.get(&4), Some(&41));
+    /// ```
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, H, A> {
+        if let Some(v_ref) = self.get_mut(&key) {
+            Entry::Occupied(OccupiedEntry {
+                map: self,
+                key,
+                value: v_ref,
+            })
+        } else {
+            Entry::Vacant(VacantEntry { map: self, key })
+        }
     }
 
     /// Returns true if the map contains the specified `key`.

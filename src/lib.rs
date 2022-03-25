@@ -133,6 +133,7 @@
 #![feature(allocator_api)]
 #![feature(const_fn_trait_bound)]
 
+mod hashentry;
 mod hashiter;
 pub mod hashmap;
 mod leapiter;
