@@ -6,7 +6,7 @@ use core::alloc::Allocator;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 
-/// Areference to an atomic cell in a [LeapMap], which cannot mutate
+/// A reference to an atomic cell in a [LeapMap], which cannot mutate
 /// the referenced cell value.
 pub struct Ref<'a, K, V, H, A: Allocator> {
     /// The atomic value which is being referenced.

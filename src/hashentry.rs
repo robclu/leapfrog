@@ -5,6 +5,9 @@ use core::alloc::Allocator;
 use core::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::alloc::Global;
 
+/// A view into a single entry in a map, which may either be vacant or occupied.
+///
+/// This enum is constructed from the `entry` method on a [`HashMap`].
 pub enum Entry<'a, K, V, H = BuildHasherDefault<DefaultHash>, A: Allocator = Global> {
     Occupied(OccupiedEntry<'a, K, V, H, A>),
     Vacant(VacantEntry<'a, K, V, H, A>),
@@ -130,7 +133,7 @@ where
         }
     }
 
-    /// Sets the value of the entry, and returns an `OccupiedEntry`.
+    /// Sets the value of the entry, and returns an [`OccupiedEntry`].
     ///
     /// # Examples
     ///
@@ -173,6 +176,7 @@ where
     }
 }
 
+/// A view into an occupied entry in a [`HashMap`]. It is part of the [`Entry`] enum.
 pub struct OccupiedEntry<'a, K, V, H, A: Allocator> {
     pub(crate) map: &'a mut HashMap<K, V, H, A>,
     pub(crate) key: K,
@@ -222,7 +226,7 @@ where
         (self.key, value)
     }
 
-    /// Gets a reference to the value in the `Entry`.
+    /// Gets a reference to the value in the [`Entry`].
     ///
     /// # Examples
     ///
@@ -241,10 +245,10 @@ where
         self.value
     }
 
-    /// Gets a mutable reference to the value in the `Entry`.
+    /// Gets a mutable reference to the value in the [`Entry`].
     ///
     /// If you need a reference to an `OccupiedEntry` which may outlive the destruction
-    /// of the `Entry` value, see `into_mut`.
+    /// of the [`Entry`] value, see `into_mut`.
     ///
     /// # Examples
     ///
@@ -271,7 +275,7 @@ where
         self.value
     }
 
-    /// Converts the `OccupiedEntry` into a mutable reference to the value in
+    /// Converts the [`OccupiedEntry`] into a mutable reference to the value in
     /// the entry with a lifetime bound to the map itself.
     ///
     /// If you need multiple references to the `OccupiedEntry`, see `get_mut`.
@@ -340,6 +344,7 @@ where
     }
 }
 
+/// A view into a vacant entry in a [`HashMap`]. It is part of the [`Entry`] enum.
 pub struct VacantEntry<'a, K, V, H, A: Allocator> {
     pub(crate) map: &'a mut HashMap<K, V, H, A>,
     pub(crate) key: K,
@@ -382,7 +387,7 @@ where
         self.key
     }
 
-    /// Sets the value of the entry with the `VacantEntry`'s key, and returns a
+    /// Sets the value of the entry with the [`VacantEntry`]'s key, and returns a
     /// mutable reference to it.
     ///
     /// ```
@@ -402,8 +407,8 @@ where
         self.map.get_mut(&self.key).unwrap()
     }
 
-    /// Sets the value of the entry with the `VacantEntry`'s key, and returns an
-    /// `OccupiedEntry`.
+    /// Sets the value of the entry with the [`VacantEntry`]'s key, and returns an
+    /// [`OccupiedEntry`].
     ///
     /// ```
     /// use leapfrog::HashMap;
