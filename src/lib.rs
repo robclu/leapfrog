@@ -131,7 +131,6 @@
 //! There is optional support for serde, via the "serde" feature.
 
 #![feature(allocator_api)]
-#![feature(const_fn_trait_bound)]
 
 mod hashentry;
 mod hashiter;
