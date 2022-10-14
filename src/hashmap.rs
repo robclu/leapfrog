@@ -834,6 +834,37 @@ where
 {
 }
 
+impl<K, V> Default for HashMap<K, V, BuildHasherDefault<DefaultHash>, Global>
+where
+    K: Eq + Hash + Clone,
+    V: Value,
+{
+    fn default() -> Self {
+        Self::new_in(Global)
+    }
+}
+
+impl<'a, K, V, H, A> Clone for HashMap<K, V, H, A>
+where
+    K: Eq + Hash + Clone + 'a,
+    V: Value + 'a,
+    H: BuildHasher + Default,
+    A: Allocator + Clone,
+{
+    fn clone(&self) -> Self {
+        let capacity = self.capacity();
+        let builder = H::default();
+        let mut new_map =
+            Self::with_capacity_and_hasher_in(capacity, builder, self.allocator.clone());
+
+        for (key, value) in self.into_iter() {
+            new_map.insert(key.clone(), *value);
+        }
+
+        new_map
+    }
+}
+
 impl<K, V, H, A: Allocator> Drop for HashMap<K, V, H, A> {
     fn drop(&mut self) {
         if !self.is_allocated() {

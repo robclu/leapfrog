@@ -70,6 +70,65 @@ fn hashmap_insert() {
     assert_eq!(inserted, removed);
 }
 
+#[test]
+fn hashmap_clone() {
+    let mut map = HashMap::<u64, u64>::with_capacity(KEYS_TO_INSERT);
+
+    let mut rng = thread_rng();
+    let start_index: u32 = rng.gen();
+    let value: u32 = rng.gen();
+    let relative_prime: u64 = value as u64 * 2 + 1;
+
+    let mut inserted: usize = 0;
+    let mut index = start_index;
+    let mut insert_checksum = 0u64;
+    while inserted < KEYS_TO_INSERT {
+        let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
+        key = key ^ (key >> 16);
+
+        // Don't add keys which are 0 or 1
+        if key >= 2 {
+            // Map is empty, we should only have None here:
+            if let Some(_old) = map.insert(key, key) {
+                panic!("HashMap value found which should not be present");
+            }
+            inserted += 1;
+            insert_checksum = insert_checksum.wrapping_add(key);
+        }
+        index += 1;
+    }
+
+    let mut removed: usize = 0;
+    let mut index = start_index;
+    let mut remove_checksum = 0u64;
+    let mut cloned_map = map.clone();
+    while removed < KEYS_TO_INSERT {
+        let mut key: u64 = (index as u64).wrapping_mul(relative_prime);
+        key = key ^ (key >> 16);
+
+        if key >= 2 {
+            if let Some(value) = cloned_map.get(&key) {
+                assert!(*value == key);
+                remove_checksum = remove_checksum.wrapping_add(key);
+                removed += 1;
+            } else {
+                panic!("Value should be found");
+            }
+
+            // Check get mut as well
+            if let Some(value) = cloned_map.get_mut(&key) {
+                assert!(*value == key);
+            } else {
+                panic!("Value should be found");
+            }
+        }
+        index += 1;
+    }
+
+    assert_eq!(insert_checksum, remove_checksum);
+    assert_eq!(inserted, removed);
+}
+
 fn generate_kvs(keys: usize) -> BTreeMap<u64, u64> {
     let mut map = BTreeMap::new();
 
