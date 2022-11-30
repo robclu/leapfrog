@@ -366,7 +366,73 @@ where
             let size_mask = table.size_mask;
             let buckets = table.bucket_slice_mut();
 
-            match Self::insert_or_find(hash, &key, value, buckets, size_mask) {
+            match Self::insert_or_find(hash, &key, value, buckets, size_mask, true) {
+                ConcurrentInsertResult::Overflow(overflow_index) => {
+                    // Try and create the table migration. Only a single thread
+                    // should do this. Any threads which don't get the flag should
+                    // start cleaning up old tables which have not been deallocated.
+                    let migrator = unsafe { &mut *self.migrator.load(Ordering::Relaxed) };
+                    if migrator.set_initialization_begin_flag() {
+                        Self::initialize_migrator(
+                            &self.allocator,
+                            migrator,
+                            &self.table,
+                            overflow_index,
+                        );
+                        migrator.set_initialization_complete_flag();
+                    }
+
+                    // Migration is created, all threads can see that try and migrate.
+                    if migrator.initialization_complete() {
+                        Self::perform_migration(&self.allocator, migrator, &self.table);
+                    }
+                }
+                ConcurrentInsertResult::Replaced(old_value) => {
+                    return Some(old_value);
+                }
+                ConcurrentInsertResult::NewInsert => {
+                    return None;
+                }
+                ConcurrentInsertResult::Migration(retry_value) => {
+                    // Another thread overflowed and started a migration.
+                    value = retry_value;
+                    //debug_assert!(value == retry_value);
+                    self.participate_in_migration();
+                }
+            }
+        }
+    }
+
+    /// Tries to insert a key-value pair into the map.
+    ///
+    /// If the map did not have this key present, the key-value pair are inserted
+    /// into the map, and `None` is returned.
+    ///
+    /// If the map did have this key present, nothing is updated, and an the
+    /// existing value is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = leapfrog::LeapMap::new();
+    /// assert_eq!(map.try_insert(37, 12), None);
+    /// assert_eq!(map.try_insert(37, 14), Some(12));
+    /// ```
+    pub fn try_insert(&self, key: K, mut value: V) -> Option<V> {
+        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+        debug_assert!(!value.is_null());
+
+        loop {
+            // We need to get the pointer to the buckets which we are going to
+            // attempt to insert into. The ideal ordering here would be Consume,
+            // but we don't have that, so we use Acquire instead. For most platforms
+            // the impact should be negligible, however, that mught not be the case
+            // for ARM, so we should check this for those platforms.
+            let table = self.get_table_mut(Ordering::Acquire);
+            let size_mask = table.size_mask;
+            let buckets = table.bucket_slice_mut();
+
+            match Self::insert_or_find(hash, &key, value, buckets, size_mask, false) {
                 ConcurrentInsertResult::Overflow(overflow_index) => {
                     // Try and create the table migration. Only a single thread
                     // should do this. Any threads which don't get the flag should
@@ -934,6 +1000,7 @@ where
         value: V,
         buckets: &[Bucket<K, V>],
         size_mask: usize,
+        must_update: bool,
     ) -> ConcurrentInsertResult<V> {
         let mut index = hash as usize;
 
@@ -953,6 +1020,8 @@ where
                     // here is a migration, in which case the value exchange below
                     // will fail.
                     cell.key.store(*key, Ordering::Relaxed);
+
+                    // This is a new insert, so we don't care about updating.
                     return Self::exchange_value(cell, value, V::null());
                 }
                 Err(new_hash) => {
@@ -974,7 +1043,13 @@ where
             }
 
             // Otherwise try and exchange the old value with the new one.
-            return Self::exchange_value(cell, value, old_value);
+            if must_update {
+                return Self::exchange_value(cell, value, old_value);
+            } else {
+                // For non-updates, we use the replaced to return the existing
+                // value without update.
+                return ConcurrentInsertResult::Replaced(old_value);
+            }
         }
 
         // Hard part, need to find a new cell ...
@@ -1024,7 +1099,11 @@ where
                         return ConcurrentInsertResult::Migration(value);
                     }
 
-                    return Self::exchange_value(cell, value, old_value);
+                    if must_update {
+                        return Self::exchange_value(cell, value, old_value);
+                    } else {
+                        return ConcurrentInsertResult::Replaced(old_value);
+                    }
                 }
 
                 // We updated the index and the delta value, so we will go back
@@ -1063,6 +1142,7 @@ where
                                 // CHECK: No race here with another cell
                                 cell.key.store(*key, Ordering::Relaxed);
 
+                                // Not an update, so we can perform an actual exchange.
                                 return Self::exchange_value(cell, value, V::null());
                             }
                             Err(updated) => probe_hash = updated,
@@ -1074,7 +1154,12 @@ where
                     let probe_key = cell.key.load(Ordering::Relaxed);
                     if x == 0 && probe_key == *key {
                         let old_value = cell.value.load(Ordering::Acquire);
-                        return Self::exchange_value(cell, value, old_value);
+
+                        if must_update {
+                            return Self::exchange_value(cell, value, old_value);
+                        } else {
+                            return ConcurrentInsertResult::Replaced(old_value);
+                        }
                     }
 
                     // Check for the same bucket:
@@ -1678,6 +1763,7 @@ impl<K, V> Migrator<K, V> {
                             src_value,
                             dst_buckets,
                             dst_size_mask,
+                            true,
                         ) {
                             ConcurrentInsertResult::Overflow(_) => {
                                 // Overflow of destination when trying to insert.
