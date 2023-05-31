@@ -468,7 +468,7 @@ where
             index += delta as usize;
             delta = Self::get_second_delta(buckets, index, size_mask);
 
-            let mut cell = Self::get_cell_mut(buckets, index, size_mask);
+            let cell = Self::get_cell_mut(buckets, index, size_mask);
             if hash == cell.hash && cell.key == *key {
                 let old_value = cell.value;
                 cell.value = value;
@@ -489,7 +489,7 @@ where
 
             // We found an empty cell, so reserve it and link it
             // to the previous cell in the same bucket.
-            let mut cell = Self::get_cell_mut(buckets, index, size_mask);
+            let cell = Self::get_cell_mut(buckets, index, size_mask);
             if cell.hash == null_hash() {
                 cell.hash = hash;
                 cell.key = key.clone();
