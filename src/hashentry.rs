@@ -1,8 +1,15 @@
-use crate::hashmap::{DefaultHash, HashMap};
-use crate::Value;
+use crate::{
+    hashmap::{DefaultHash, HashMap},
+    Value,
+};
 
-use core::alloc::Allocator;
 use core::hash::{BuildHasher, BuildHasherDefault, Hash};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::{Allocator, Global};
+#[cfg(not(feature = "stable_alloc"))]
+use core::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
 use std::alloc::Global;
 
 /// A view into a single entry in a map, which may either be vacant or occupied.

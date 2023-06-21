@@ -2,9 +2,16 @@ use crate::{
     leapmap::{AtomicCell, LeapMap},
     Value,
 };
+
+use core::{
+    hash::{BuildHasher, Hash},
+    sync::atomic::Ordering,
+};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
-use core::hash::{BuildHasher, Hash};
-use core::sync::atomic::Ordering;
 
 /// A reference to an atomic cell in a [LeapMap], which cannot mutate
 /// the referenced cell value.

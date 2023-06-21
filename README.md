@@ -30,6 +30,8 @@ for both is much closer to `std::collections::HashMap`. There is now also suppor
 serde with the optional "serde" feature. The maps also now have iterator support. The
 default hasher has been changed to be the DOS resistant hasher from the standard library.
 
+The "stable_alloc" feature flag has been added to allow the crate to be used with the stable toolchain.
+
 # Current Limitations
 
 These is not yet support for rayon, but it will be added next. There are also no set

@@ -1,10 +1,11 @@
-use core::{
-    alloc::Allocator,
-    hash::{BuildHasher, Hash},
-};
+use crate::{hashmap::HashMap, Value};
 
-use crate::hashmap::HashMap;
-use crate::Value;
+use core::hash::{BuildHasher, Hash};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
+use std::alloc::Allocator;
 
 /// Iterator over a [`HashMap`] which yields key-value pairs.
 ///

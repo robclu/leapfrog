@@ -129,8 +129,17 @@
 //! # Features
 //!
 //! There is optional support for serde, via the "serde" feature.
+//!
+//! # Usage with stable
+//!
+//! This crate requires the [`allocator_api`] feature, which is only available on nightly.
+//! To enable use of the crate with the stable toolchain, the "stable_alloc" feature has
+//! been added.
+//!
+//! If/when the [`allocator_api`] feature is no longer experimental, this feature flag will
+//! be removed.
 
-#![feature(allocator_api)]
+#![cfg_attr(not(feature = "stable_alloc"), feature(allocator_api))]
 
 mod hashentry;
 mod hashiter;
@@ -147,8 +156,9 @@ mod hashmap_serde;
 mod leapmap_serde;
 
 use crate::util::load_u64_le;
-use std::borrow::Borrow;
-use std::{
+
+use core::{
+    borrow::Borrow,
     default::Default,
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},

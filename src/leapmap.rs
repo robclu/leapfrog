@@ -1,14 +1,24 @@
-use crate::leapiter::{Iter, IterMut, OwnedIter};
-use crate::leapref::{Ref, RefMut};
-use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
-use crate::{make_hash, Value};
-use atomic::Atomic;
-use std::alloc::{Allocator, Global};
-use std::borrow::Borrow;
-use std::hash::{BuildHasher, BuildHasherDefault, Hash};
-use std::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+use crate::{
+    leapiter::{Iter, IterMut, OwnedIter},
+    leapref::{Ref, RefMut},
+    make_hash,
+    util::{allocate, deallocate, round_to_pow2, AllocationKind},
+    Value,
 };
+
+use atomic::Atomic;
+use core::{
+    borrow::Borrow,
+    hash::{BuildHasher, BuildHasherDefault, Hash},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::{Allocator, Global};
+#[cfg(not(feature = "stable_alloc"))]
+use core::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
+use std::alloc::Global;
 
 /// The default hasher for a [`LeapMap`].
 pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;

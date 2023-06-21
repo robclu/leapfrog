@@ -1,11 +1,22 @@
 use crate::{HashMap, Value};
+
+use core::{
+    fmt,
+    hash::{BuildHasher, Hash},
+    marker::PhantomData,
+};
+
+use serde_crate::{
+    de::{Deserialize, MapAccess, Visitor},
+    ser::{Serialize, SerializeMap, Serializer},
+    Deserializer,
+};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::{Allocator, Global};
+#[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
-use core::fmt;
-use core::hash::{BuildHasher, Hash};
-use core::marker::PhantomData;
-use serde_crate::de::{Deserialize, MapAccess, Visitor};
-use serde_crate::ser::{Serialize, SerializeMap, Serializer};
-use serde_crate::Deserializer;
+#[cfg(not(feature = "stable_alloc"))]
 use std::alloc::Global;
 
 pub struct HashMapVisitor<K, V, H> {

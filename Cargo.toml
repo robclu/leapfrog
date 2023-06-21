@@ -1,6 +1,6 @@
 [package]
 name = "leapfrog"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["Rob Clucas <robjclucas@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -14,15 +14,17 @@ categories = ["concurrency", "data-structures"]
 
 [features]
 default = []
-serde = []
+serde = ["dep:serde_crate"]
+stable_alloc = ["dep:allocator-api2"]
 
 [profile.release]
-debug = true
+debug = false
 lto = true
 
 [dependencies]
+allocator-api2 = { version = "0.2.15", optional = true }
 atomic = "0.5.1"
-serde_crate = { package = "serde", version = "1.0.136", features = ["derive"] }
+serde_crate = { package = "serde", version = "1.0.136", features = ["derive"], optional = true }
 
 [dev-dependencies]
 core_affinity = "0.5.10"
@@ -35,4 +37,4 @@ name = "hashmap"
 harness = false
 
 [package.metadata.docs.rs]
-features = ["serde"]
+features = ["serde", "stable_alloc"]

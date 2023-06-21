@@ -1,5 +1,12 @@
-use std::alloc::{Allocator, Layout};
-use std::ops::{Add, BitOr, Shr, Sub, SubAssign};
+use core::{
+    alloc::Layout,
+    ops::{Add, BitOr, Shr, Sub, SubAssign},
+};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
+use core::alloc::Allocator;
 
 /// Loads the buffer `buf` as a u64.
 #[inline]

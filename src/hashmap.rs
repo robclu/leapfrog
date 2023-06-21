@@ -1,12 +1,21 @@
-use crate::hashiter::{Iter, IterMut, OwnedIter};
-use crate::util::{allocate, deallocate, round_to_pow2, AllocationKind};
-use crate::{make_hash, Value};
-use core::alloc::Allocator;
+use crate::{
+    hashiter::{Iter, IterMut, OwnedIter},
+    make_hash,
+    util::{allocate, deallocate, round_to_pow2, AllocationKind},
+    Value,
+};
+
 use core::{
     borrow::Borrow,
     default::Default,
     hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
 };
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::{Allocator, Global};
+#[cfg(not(feature = "stable_alloc"))]
+use core::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
 use std::alloc::Global;
 
 // Re export the entry api.

@@ -1,11 +1,11 @@
-use core::{
-    alloc::Allocator,
-    hash::{BuildHasher, Hash},
-};
+use crate::{leapmap::null_hash, LeapMap, Ref, RefMut, Value};
 
-use crate::LeapMap;
-use crate::Value;
-use crate::{leapmap::null_hash, Ref, RefMut};
+use core::hash::{BuildHasher, Hash};
+
+#[cfg(feature = "stable_alloc")]
+use allocator_api2::alloc::Allocator;
+#[cfg(not(feature = "stable_alloc"))]
+use core::alloc::Allocator;
 
 /// Iterator over a [`LeapMap`] which yields key-value pairs.
 ///
