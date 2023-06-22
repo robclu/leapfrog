@@ -75,7 +75,18 @@
 //! | DashMap          | 14.1           | 0.72         | 87.5            | 4.51          |
 //! | LeapMap          | 17.8           | 0.92         | 148.0           | 7.62          |
 //!
+//! On an 12 core M2 Max, the results were the following:
+//!
+//! | Map              | Throughput (1) | Relative (1) | Throughput (12) | Relative (12) |
+//! |------------------|----------------|--------------|-----------------|---------------|
+//! | RwLock + HashMap | 21.2           | 1.0          | 3.4             | 0.16          |
+//! | Flurry           | 8.0            | 0.37         | 64.5            | 3.04          |
+//! | DashMap          | 10.4           | 0.49         | 42.2            | 2.00          |
+//! | Evmap            | 13.5           | 0.64         | 18.7            | 0.88          |
+//! | LeapMap          | 13.9           | 0.66         | 106.1           | 5.00          |
+//!
 //! On an exchange heavy benchmark, the leapmap was even faster.
+//!
 //! The performance of the [`LeapMap`] is limited is when rapidly growing the map, since
 //! the bottleneck then becomes the resizing (allocation) and migration operations.
 //! The map **is not** designed to be resized often (resizing infrequently has very
@@ -132,11 +143,11 @@
 //!
 //! # Usage with stable
 //!
-//! This crate requires the [`allocator_api`] feature, which is only available on nightly.
-//! To enable use of the crate with the stable toolchain, the "stable_alloc" feature has
+//! This crate requires the `allocator_api` feature, which is only available on nightly.
+//! To enable use of the crate with the stable toolchain, the `"stable_alloc"` feature has
 //! been added.
 //!
-//! If/when the [`allocator_api`] feature is no longer experimental, this feature flag will
+//! If/when the `allocator_api` feature is no longer experimental, this feature flag will
 //! be removed.
 
 #![cfg_attr(not(feature = "stable_alloc"), feature(allocator_api))]
