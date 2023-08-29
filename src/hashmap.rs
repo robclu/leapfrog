@@ -1,3 +1,6 @@
+//! This module provides the [`HashMap`] struct, which is an implementation of an efficient
+//! single-threaded hash map.
+
 use crate::{
     hashiter::{Iter, IterMut, OwnedIter},
     make_hash,
@@ -623,7 +626,7 @@ where
         let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
         let in_use_estimated = (size_mask + 1) as f32 * ratio;
         let estimated = round_to_pow2((in_use_estimated * 2.0) as usize);
-        let mut new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
+        let mut new_table_size = estimated.max(Self::INITIAL_SIZE);
 
         loop {
             if self.try_move_to_new_buckets(new_table_size) {
@@ -709,7 +712,7 @@ where
             for cell in 0..4 {
                 // FIXME: How to initialize keys?
                 unsafe {
-                    let cell_hash = &mut buckets[i].cells[cell].hash as *mut HashedKey;
+                    let cell_hash: *mut HashedKey = &mut buckets[i].cells[cell].hash;
                     std::ptr::write_bytes(cell_hash, 0, 1);
                 };
 
@@ -867,7 +870,7 @@ where
             Self::with_capacity_and_hasher_in(capacity, builder, self.allocator.clone());
 
         for (key, value) in self.into_iter() {
-            new_map.insert(key.clone(), *value);
+            let _old = new_map.insert(key.clone(), *value);
         }
 
         new_map
@@ -947,7 +950,7 @@ pub(crate) struct Cell<K, V> {
 
 impl<K, V> Cell<K, V> {
     /// Returns true if the cell is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.hash == null_hash()
     }
 }
@@ -963,17 +966,17 @@ struct Table<K, V> {
 
 impl<K, V> Table<K, V> {
     /// Gets a mutable slice of the table buckets.
-    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+    fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
         unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
     }
 
     /// Gets a slice of the table buckets.
-    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+    fn bucket_slice(&self) -> &[Bucket<K, V>] {
         unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
     }
 
     /// Returns the number of cells in the table.
-    pub fn size(&self) -> usize {
+    fn size(&self) -> usize {
         self.size_mask + 1
     }
 }

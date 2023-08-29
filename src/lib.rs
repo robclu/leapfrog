@@ -291,18 +291,19 @@ impl Hasher for FnvHasher {
     }
 }
 
-// This is not really a hasher, it just returns the value to be hashed, however,
-// if it's known that the key is unique, it might be useful in such a scenario.
+/// This is not really a hasher, but more of a mock hasher, as it just returns the value
+/// to be hashed. However, if it's known that the key is unique, it might be useful in
+/// such a scenario.
 #[derive(Default)]
 pub struct SimpleHasher(u64);
 
 impl Hasher for SimpleHasher {
-    #[inline]
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
 
-    #[inline]
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         *self = SimpleHasher(load_u64_le(bytes, bytes.len()));
     }

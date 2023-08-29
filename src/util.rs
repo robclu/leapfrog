@@ -1,3 +1,5 @@
+//! This module provides utility functionality used throughout the crate.
+
 use core::{
     alloc::Layout,
     ops::{Add, BitOr, Shr, Sub, SubAssign},
@@ -9,12 +11,13 @@ use allocator_api2::alloc::Allocator;
 use core::alloc::Allocator;
 
 /// Loads the buffer `buf` as a u64.
-#[inline]
+#[inline(always)]
 pub fn load_u64_le(buf: &[u8], len: usize) -> u64 {
     debug_assert!(len <= buf.len());
     let mut data = 0u64;
+    let ptr: *mut _ = &mut data;
     unsafe {
-        std::ptr::copy_nonoverlapping(buf.as_ptr(), &mut data as *mut _ as *mut u8, len);
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, len);
     }
     data.to_le()
 }

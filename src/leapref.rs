@@ -1,3 +1,6 @@
+//! This module provides reference functionalty for referencing elements in a [`LeapMap`]
+//! is a thread-safe manner.
+
 use crate::{
     leapmap::{AtomicCell, LeapMap},
     Value,

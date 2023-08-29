@@ -1,3 +1,6 @@
+//! This module provides the [`LeapMap`] struct, which is a very fast implementation of
+//! a concurrent hash map.
+
 use crate::{
     leapiter::{Iter, IterMut, OwnedIter},
     leapref::{Ref, RefMut},
@@ -389,7 +392,7 @@ where
                             &self.table,
                             overflow_index,
                         );
-                        migrator.set_initialization_complete_flag();
+                        let _self_called = migrator.set_initialization_complete_flag();
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -455,7 +458,7 @@ where
                             &self.table,
                             overflow_index,
                         );
-                        migrator.set_initialization_complete_flag();
+                        let _self_called = migrator.set_initialization_complete_flag();
                     }
 
                     // Migration is created, all threads can see that try and migrate.
@@ -750,7 +753,7 @@ where
 
         // FIXME: This doesn't allow the map to shrink
         //let new_table_size = estimated.max((size_mask + 1) as usize);
-        let new_table_size = estimated.max(Self::INITIAL_SIZE as usize);
+        let new_table_size = estimated.max(Self::INITIAL_SIZE);
 
         // Migrator initialization:
         let dst_table_ptr = Self::allocate_and_init_table(allocator, new_table_size);
@@ -760,7 +763,7 @@ where
 
         // Zero out the status during migration, but keep the low bits for
         // initialization status:
-        migrator
+        let _old = migrator
             .status
             .fetch_and(Migrator::<K, V>::STATUS_MASK, Ordering::Relaxed);
         migrator
@@ -786,7 +789,7 @@ where
 
             migrator.stale_sources[index]
                 .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
-            migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
+            let _old = migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
         }
 
         let source = MigrationSource::<K, V> {
@@ -891,7 +894,7 @@ where
                 let end_index = start_index + Self::MIGRATION_UNIT_SIZE;
                 if !migrator.migrate_range::<H, A>(i as usize, start_index, end_index) {
                     migrator.overflowed.store(true, Ordering::Relaxed);
-                    migrator.status.fetch_or(1, Ordering::Relaxed);
+                    let _old = migrator.status.fetch_or(1, Ordering::Relaxed);
                     finished = true;
                     break;
                 }
@@ -899,7 +902,7 @@ where
                 // Successfully migrated some of the units, update status and
                 // then either try again or we are done:
                 if migrator.remaining_units.fetch_sub(1, Ordering::Relaxed) == 1 {
-                    migrator.status.fetch_or(1, Ordering::Relaxed);
+                    let _old = migrator.status.fetch_or(1, Ordering::Relaxed);
                     finished = true;
                     break;
                 }
@@ -1273,7 +1276,7 @@ where
             for cell in 0..4 {
                 unsafe {
                     // We only need to write the hash as null, an can ignore th key.
-                    let cell_hash = &mut bucket.cells[cell].hash as *mut AtomicHashedKey;
+                    let cell_hash: *mut AtomicHashedKey = &mut bucket.cells[cell].hash;
                     std::ptr::write_bytes(cell_hash, 0, 1);
                 };
 
@@ -1472,17 +1475,17 @@ struct Table<K, V> {
 
 impl<K, V> Table<K, V> {
     /// Gets a mutable slice of the table buckets.
-    pub fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
+    pub(super) fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
         unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
     }
 
     /// Gets a slice of the table buckets.
-    pub fn bucket_slice(&self) -> &[Bucket<K, V>] {
+    pub(super) fn bucket_slice(&self) -> &[Bucket<K, V>] {
         unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
     }
 
     /// Returns the number of cells in the table.
-    pub fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         self.size_mask + 1
     }
 }
@@ -1528,7 +1531,7 @@ struct MigrationSource<K, V> {
 
 impl<K, V> MigrationSource<K, V> {
     /// Returns the number of cells in the table.
-    pub fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         let table = unsafe { &*self.table.load(Ordering::Relaxed) };
         table.size_mask + 1
     }
@@ -1567,7 +1570,7 @@ impl<K, V> Migrator<K, V> {
     /// Mask for initialization complete.
     pub(super) const INITIALIZATION_END_FLAG: usize = 0x04;
     /// Mask of all initialization flags.
-    pub const INITIALIZATION_MASK: usize =
+    pub(super) const INITIALIZATION_MASK: usize =
         Self::INITIALIZATION_START_FLAG | Self::INITIALIZATION_END_FLAG;
 
     /// Mask for status flags.
@@ -1582,7 +1585,7 @@ impl<K, V> Migrator<K, V> {
     const STALE_CAPACITY_MASK: usize = Self::STALE_SOURCES - 1;
 
     /// Initializes the migrator.
-    pub fn initialize(&mut self) {
+    fn initialize(&mut self) {
         self.stale_sources = Vec::with_capacity(Self::STALE_SOURCES);
         for _ in 0..Self::STALE_SOURCES {
             self.stale_sources
@@ -1621,37 +1624,37 @@ impl<K, V> Migrator<K, V> {
     }
 
     /// If the migrator has completed/is completing the migration.
-    pub fn finishing(&self) -> bool {
+    fn finishing(&self) -> bool {
         let status = self.status.load(Ordering::Relaxed);
         status & Self::MIGRATION_COMPLETE_FLAG == Self::MIGRATION_COMPLETE_FLAG || status == 0
     }
 
     /// If the migrator has completed initialization
-    pub fn initialization_complete(&self) -> bool {
+    fn initialization_complete(&self) -> bool {
         self.status.load(Ordering::Relaxed) & Self::INITIALIZATION_MASK == Self::INITIALIZATION_MASK
     }
 
     /// This returns true if the migrator is in process, which is the time from
     /// which the initialization flag is set until the time at which the thread
     /// which finishes the migration sets the status to zero.
-    pub fn in_process(&self) -> bool {
+    fn in_process(&self) -> bool {
         self.status.load(Ordering::Relaxed) & Self::INITIALIZATION_START_FLAG
             == Self::INITIALIZATION_START_FLAG
     }
 
     /// Gets the index into the stale source buffer for the specified `index`.
-    pub fn stale_source_index(&self, index: usize) -> usize {
+    fn stale_source_index(&self, index: usize) -> usize {
         index & Self::STALE_CAPACITY_MASK
     }
 
     /// Returns the number of stale source tables to clean up.
-    pub fn stale_tables_remaining(&self) -> u32 {
+    fn stale_tables_remaining(&self) -> u32 {
         self.last_stale_source.load(Ordering::Relaxed)
             - self.current_stale_source.load(Ordering::Relaxed)
     }
 
     /// Tries to clean up (deallocate) any stale source tables.
-    pub fn cleanup_stale_table<A: Allocator>(&self, allocator: &A) {
+    fn cleanup_stale_table<A: Allocator>(&self, allocator: &A) {
         let current = self.current_stale_source.load(Ordering::Relaxed);
         let last_visible = self.last_stale_source.load(Ordering::Relaxed);
 
@@ -1687,12 +1690,7 @@ impl<K, V> Migrator<K, V> {
     /// Performs the migration of a range of the buckets between `start_index`
     /// and `end_index` for the source with index `src_index. This returns true
     /// if the migration completed successfully.
-    pub fn migrate_range<H, A>(
-        &self,
-        src_index: usize,
-        start_index: usize,
-        end_index: usize,
-    ) -> bool
+    fn migrate_range<H, A>(&self, src_index: usize, start_index: usize, end_index: usize) -> bool
     where
         K: Hash + Eq + Copy,
         H: BuildHasher + Default,

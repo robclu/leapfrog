@@ -16,7 +16,9 @@ use std::alloc::Global;
 ///
 /// This enum is constructed from the `entry` method on a [`HashMap`].
 pub enum Entry<'a, K, V, H = BuildHasherDefault<DefaultHash>, A: Allocator = Global> {
+    /// An entry for which the cell is occupied.
     Occupied(OccupiedEntry<'a, K, V, H, A>),
+    /// An entry for which the cell is vacant.
     Vacant(VacantEntry<'a, K, V, H, A>),
 }
 
@@ -156,7 +158,7 @@ where
     pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, H, A> {
         match self {
             Entry::Occupied(mut o) => {
-                o.insert(value);
+                let _old = o.insert(value);
                 o
             }
             Entry::Vacant(v) => v.insert_entry(value),
@@ -410,7 +412,7 @@ where
     /// assert_eq!(map.get(&1), Some(&37));
     /// ```
     pub fn insert(&mut self, value: V) -> &'a mut V {
-        self.map.insert(self.key.clone(), value);
+        let _old = self.map.insert(self.key.clone(), value);
         self.map.get_mut(&self.key).unwrap()
     }
 
@@ -430,7 +432,7 @@ where
     /// assert_eq!(map.get(&1), Some(&37));
     /// ```
     pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, H, A> {
-        self.map.insert(self.key.clone(), value);
+        let _old = self.map.insert(self.key.clone(), value);
         let value = self.map.get_mut(&self.key).unwrap();
         OccupiedEntry {
             map: self.map,
