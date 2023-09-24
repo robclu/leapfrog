@@ -201,6 +201,13 @@ fn hashmap_iter() {
     }
 
     assert_eq!(count, KEYS);
+
+    for k in kv_map.keys() {
+        map.remove(k);
+    }
+
+    assert!(map.is_empty());
+    assert!(map.iter().next().is_none());
 }
 
 #[test]
@@ -230,4 +237,11 @@ fn hashmap_iter_mut() {
     }
 
     assert_eq!(count, KEYS);
+
+    for k in kv_map.keys() {
+        map.remove(k);
+    }
+
+    assert!(map.is_empty());
+    assert!(map.iter_mut().next().is_none());
 }
