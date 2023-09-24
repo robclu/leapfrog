@@ -256,6 +256,14 @@ fn leapmap_iter() {
     }
 
     assert_eq!(count, KEYS);
+
+    for k in kv_map.keys() {
+        map.remove(k);
+    }
+
+    for mut item in map.iter() {
+        assert!(item.key_value().is_none());
+    }
 }
 
 #[test]
@@ -292,5 +300,13 @@ fn leapmap_iter_mut() {
             panic!("LeapMap value is incorrect");
         }
         count += 1;
+    }
+
+    for k in kv_map.keys() {
+        map.remove(k);
+    }
+
+    for mut item in map.iter() {
+        assert!(item.key_value().is_none());
     }
 }
