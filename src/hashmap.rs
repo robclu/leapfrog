@@ -129,7 +129,8 @@ where
     A: Allocator,
 {
     /// The default initial size of the map.
-    const INITIAL_SIZE: usize = 8;
+    /// Make sure it's a multiple of CELLS_IN_USE, so that no floats are needed during resizing
+    const INITIAL_SIZE: usize = Self::CELLS_IN_USE;
 
     /// The max number of elements to search through when having to fallback
     /// to using linear search to try to find a cell.
@@ -623,9 +624,9 @@ where
         }
 
         // Estimate how much we need to resize by:
-        let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
-        let in_use_estimated = (size_mask + 1) as f32 * ratio;
-        let estimated = round_to_pow2((in_use_estimated * 2.0) as usize);
+        // Brute-froce estimate to avoid floats
+        let in_use_estimated = (size_mask + 1) * cells_in_use / Self::CELLS_IN_USE;
+        let estimated = round_to_pow2((in_use_estimated * 2) as usize);
         let mut new_table_size = estimated.max(Self::INITIAL_SIZE);
 
         loop {
