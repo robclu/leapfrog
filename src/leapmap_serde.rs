@@ -17,7 +17,7 @@ use allocator_api2::alloc::{Allocator, Global};
 #[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
 #[cfg(not(feature = "stable_alloc"))]
-use std::alloc::Global;
+use alloc::alloc::Global;
 
 pub struct LeapMapVisitor<K, V, H> {
     marker: PhantomData<fn() -> LeapMap<K, V, H, Global>>,
@@ -38,7 +38,7 @@ where
 
 impl<'de, K, V, H> Visitor<'de> for LeapMapVisitor<K, V, H>
 where
-    K: Deserialize<'de> + Eq + Hash + Copy + std::fmt::Debug,
+    K: Deserialize<'de> + Eq + Hash + Copy + core::fmt::Debug,
     V: Deserialize<'de> + Value,
     H: BuildHasher + Clone + Default,
 {
@@ -65,7 +65,7 @@ where
 
 impl<'de, K, V, H> Deserialize<'de> for LeapMap<K, V, H, Global>
 where
-    K: Deserialize<'de> + Eq + Hash + Copy + std::fmt::Debug,
+    K: Deserialize<'de> + Eq + Hash + Copy + core::fmt::Debug,
     V: Deserialize<'de> + Value,
     H: BuildHasher + Clone + Default,
 {
