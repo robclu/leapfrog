@@ -14,18 +14,18 @@ use core::{
     hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
 };
 
+#[cfg(not(feature = "stable_alloc"))]
+use alloc::alloc::Global;
 #[cfg(feature = "stable_alloc")]
 use allocator_api2::alloc::{Allocator, Global};
 #[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
-#[cfg(not(feature = "stable_alloc"))]
-use std::alloc::Global;
 
 // Re export the entry api.
 pub use crate::hashentry::{Entry, OccupiedEntry, VacantEntry};
 
 /// The default hasher for a [`HashMap`].
-pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
+pub(crate) type DefaultHash = crate::FnvHasher;
 
 /// A [`HashMap`] implementation which uses a modified form of RobinHood/Hopscotch
 /// probing. This implementation is efficient, roughly 2x the performance of
@@ -129,7 +129,8 @@ where
     A: Allocator,
 {
     /// The default initial size of the map.
-    const INITIAL_SIZE: usize = 8;
+    /// Make sure it's a multiple of CELLS_IN_USE, so that no floats are needed during resizing
+    const INITIAL_SIZE: usize = Self::CELLS_IN_USE;
 
     /// The max number of elements to search through when having to fallback
     /// to using linear search to try to find a cell.
@@ -623,9 +624,9 @@ where
         }
 
         // Estimate how much we need to resize by:
-        let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
-        let in_use_estimated = (size_mask + 1) as f32 * ratio;
-        let estimated = round_to_pow2((in_use_estimated * 2.0) as usize);
+        // Brute-froce estimate to avoid floats
+        let in_use_estimated = (size_mask + 1) * cells_in_use / Self::CELLS_IN_USE;
+        let estimated = round_to_pow2((in_use_estimated * 2) as usize);
         let mut new_table_size = estimated.max(Self::INITIAL_SIZE);
 
         loop {
@@ -699,21 +700,21 @@ where
         let bucket_count = cells >> 2;
         let bucket_ptr =
             allocate::<Bucket<K, V>, A>(allocator, bucket_count, AllocationKind::Uninitialized);
-        let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
+        let buckets = unsafe { core::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
         // we can write them as zero, rather than calling the atomic versions
         for i in 0..bucket_count {
             unsafe {
                 let bucket_deltas = &mut buckets[i].deltas as *mut u8;
-                std::ptr::write_bytes(bucket_deltas, 0, 8);
+                core::ptr::write_bytes(bucket_deltas, 0, 8);
             };
 
             for cell in 0..4 {
                 // FIXME: How to initialize keys?
                 unsafe {
                     let cell_hash: *mut HashedKey = &mut buckets[i].cells[cell].hash;
-                    std::ptr::write_bytes(cell_hash, 0, 1);
+                    core::ptr::write_bytes(cell_hash, 0, 1);
                 };
 
                 // FIXME: We should check if the stored type is directly writable ..
@@ -967,12 +968,12 @@ struct Table<K, V> {
 impl<K, V> Table<K, V> {
     /// Gets a mutable slice of the table buckets.
     fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+        unsafe { core::slice::from_raw_parts_mut(self.buckets, self.size()) }
     }
 
     /// Gets a slice of the table buckets.
     fn bucket_slice(&self) -> &[Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+        unsafe { core::slice::from_raw_parts(self.buckets, self.size()) }
     }
 
     /// Returns the number of cells in the table.
@@ -994,7 +995,7 @@ struct Bucket<K, V> {
     /// Cells for the bucket.
     cells: [Cell<K, V>; 4],
     /// Placeholder for the key
-    _key: std::marker::PhantomData<K>,
+    _key: core::marker::PhantomData<K>,
 }
 
 /// Defines the result of an insert into the [HashMap].

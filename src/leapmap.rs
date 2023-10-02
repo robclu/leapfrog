@@ -16,15 +16,17 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
 };
 
+use alloc::{vec, vec::Vec};
+
+#[cfg(not(feature = "stable_alloc"))]
+use alloc::alloc::Global;
 #[cfg(feature = "stable_alloc")]
 use allocator_api2::alloc::{Allocator, Global};
 #[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
-#[cfg(not(feature = "stable_alloc"))]
-use std::alloc::Global;
 
 /// The default hasher for a [`LeapMap`].
-pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
+pub(crate) type DefaultHash = crate::FnvHasher;
 
 /// A concurrent hash map implementation which uses a modified form of RobinHood/
 /// Hopscotch probing. This implementation is lock-free, and therefore it will
@@ -51,7 +53,7 @@ pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 /// # Limitations
 ///
 /// This biggest limitations of this map are that the interface is slightly
-/// different than using [`std::sync::RwLock<HashMap>`]. The type returned
+/// different than using [`core::sync::RwLock<HashMap>`]. The type returned
 /// when calling `get`, `get_mut`, `iter`, etc, are not references, but rather a
 /// [`Ref`] or [`RefMut`] type which acts like a reference but still allows concurrent
 /// operations on both that reference type and the map. This interface is still
@@ -161,7 +163,8 @@ where
     A: Allocator,
 {
     /// The default initial size of the map.
-    const INITIAL_SIZE: usize = 8;
+    /// Make sure it's a multiple of CELLS_IN_USE, so that no floats are needed during resizing
+    const INITIAL_SIZE: usize = Self::CELLS_IN_USE;
 
     /// The max number of elements to search through when having to fallback
     /// to using linear search to try to find a cell.
@@ -747,9 +750,9 @@ where
         }
 
         // Estimate how much we need to resize by:
-        let ratio = cells_in_use as f32 / Self::CELLS_IN_USE as f32;
-        let in_use_estimated = (size_mask + 1) as f32 * ratio;
-        let estimated = round_to_pow2((in_use_estimated * 2.0).max(1.0) as usize);
+        // Brute-froce estimate to avoid floats
+        let in_use_estimated = (size_mask + 1) * cells_in_use / Self::CELLS_IN_USE;
+        let estimated = round_to_pow2((in_use_estimated * 2) as usize);
 
         // FIXME: This doesn't allow the map to shrink
         //let new_table_size = estimated.max((size_mask + 1) as usize);
@@ -975,7 +978,7 @@ where
             migrator.overflowed.store(false, Ordering::Relaxed);
             //migrator
             //    .dst_table
-            //    .store(std::ptr::null_mut(), Ordering::Relaxed);
+            //    .store(core::ptr::null_mut(), Ordering::Relaxed);
 
             // We don't move the source tables here, rather, we wait until the
             // next mogration and add them to the cleanup queue then.
@@ -1263,21 +1266,21 @@ where
         let bucket_count = cells >> 2;
         let bucket_ptr =
             allocate::<Bucket<K, V>, A>(allocator, bucket_count, AllocationKind::Uninitialized);
-        let buckets = unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
+        let buckets = unsafe { core::slice::from_raw_parts_mut(bucket_ptr, bucket_count) };
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
         // we can write them as zero, rather than calling the atomic versions
         for bucket in buckets.iter_mut().take(bucket_count) {
             unsafe {
                 let bucket_deltas = &mut bucket.deltas as *mut AtomicU8;
-                std::ptr::write_bytes(bucket_deltas, 0, 8);
+                core::ptr::write_bytes(bucket_deltas, 0, 8);
             };
 
             for cell in 0..4 {
                 unsafe {
                     // We only need to write the hash as null, an can ignore th key.
                     let cell_hash: *mut AtomicHashedKey = &mut bucket.cells[cell].hash;
-                    std::ptr::write_bytes(cell_hash, 0, 1);
+                    core::ptr::write_bytes(cell_hash, 0, 1);
                 };
 
                 // FIXME: Check if the stored type is directly writable ..
@@ -1476,12 +1479,12 @@ struct Table<K, V> {
 impl<K, V> Table<K, V> {
     /// Gets a mutable slice of the table buckets.
     pub(super) fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+        unsafe { core::slice::from_raw_parts_mut(self.buckets, self.size()) }
     }
 
     /// Gets a slice of the table buckets.
     pub(super) fn bucket_slice(&self) -> &[Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+        unsafe { core::slice::from_raw_parts(self.buckets, self.size()) }
     }
 
     /// Returns the number of cells in the table.
@@ -1589,11 +1592,11 @@ impl<K, V> Migrator<K, V> {
         self.stale_sources = Vec::with_capacity(Self::STALE_SOURCES);
         for _ in 0..Self::STALE_SOURCES {
             self.stale_sources
-                .push(AtomicPtr::<Table<K, V>>::new(std::ptr::null_mut()));
+                .push(AtomicPtr::<Table<K, V>>::new(core::ptr::null_mut()));
         }
 
         self.dst_table
-            .store(std::ptr::null_mut(), Ordering::Relaxed);
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
         self.sources = vec![];
         self.status.store(Self::RESET_FLAG, Ordering::Relaxed);
         self.remaining_units.store(0, Ordering::Relaxed);
@@ -1681,7 +1684,7 @@ impl<K, V> Migrator<K, V> {
             let bucket_count = table.size() >> 2;
             deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
             deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
-            self.stale_sources[index].store(std::ptr::null_mut(), Ordering::Relaxed);
+            self.stale_sources[index].store(core::ptr::null_mut(), Ordering::Relaxed);
         }
 
         // Lost the race, just return.

@@ -150,7 +150,10 @@
 //! If/when the `allocator_api` feature is no longer experimental, this feature flag will
 //! be removed.
 
+#![no_std]
 #![cfg_attr(not(feature = "stable_alloc"), feature(allocator_api))]
+
+extern crate alloc;
 
 mod hashentry;
 mod hashiter;

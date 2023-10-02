@@ -10,7 +10,7 @@ use allocator_api2::alloc::{Allocator, Global};
 #[cfg(not(feature = "stable_alloc"))]
 use core::alloc::Allocator;
 #[cfg(not(feature = "stable_alloc"))]
-use std::alloc::Global;
+use alloc::alloc::Global;
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
 ///

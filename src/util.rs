@@ -8,7 +8,7 @@ use core::{
 #[cfg(feature = "stable_alloc")]
 use allocator_api2::alloc::Allocator;
 #[cfg(not(feature = "stable_alloc"))]
-use core::alloc::Allocator;
+use alloc::alloc::Allocator;
 
 /// Loads the buffer `buf` as a u64.
 #[inline(always)]
@@ -17,7 +17,7 @@ pub fn load_u64_le(buf: &[u8], len: usize) -> u64 {
     let mut data = 0u64;
     let ptr: *mut _ = &mut data;
     unsafe {
-        std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, len);
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, len);
     }
     data.to_le()
 }
@@ -35,7 +35,7 @@ where
         + From<usize>,
 {
     let v = value - T::from(1);
-    let res = match std::mem::size_of::<T>() {
+    let res = match core::mem::size_of::<T>() {
         1 => {
             let v = v | (v >> T::from(1));
             let v = v | (v >> T::from(2));
@@ -81,8 +81,8 @@ pub(crate) fn allocate<T, A: Allocator>(
     count: usize,
     kind: AllocationKind,
 ) -> *mut T {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
+    let size = core::mem::size_of::<T>();
+    let align = core::mem::align_of::<T>();
 
     // We unwrap here because we want to panic if we fail to get a valid layout
     let layout = Layout::from_size_align(size * count, align).unwrap();
@@ -96,15 +96,15 @@ pub(crate) fn allocate<T, A: Allocator>(
 
 /// Deallocates `count` number of elements of type T, using the `allocator`.
 pub(crate) fn deallocate<T, A: Allocator>(allocator: &A, ptr: *mut T, count: usize) {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
+    let size = core::mem::size_of::<T>();
+    let align = core::mem::align_of::<T>();
 
     // We unwrap here because we want to panic if we fail to get a valid layout
     let layout = Layout::from_size_align(size * count, align).unwrap();
 
     // Again, unwrap the allocation result. It should never fail to allocate.
     let raw_ptr = ptr as *mut u8;
-    let nonnull_ptr = std::ptr::NonNull::new(raw_ptr).unwrap();
+    let nonnull_ptr = core::ptr::NonNull::new(raw_ptr).unwrap();
     unsafe {
         allocator.deallocate(nonnull_ptr, layout);
     }

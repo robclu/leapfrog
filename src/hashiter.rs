@@ -5,7 +5,7 @@ use core::hash::{BuildHasher, Hash};
 #[cfg(feature = "stable_alloc")]
 use allocator_api2::alloc::Allocator;
 #[cfg(not(feature = "stable_alloc"))]
-use std::alloc::Allocator;
+use alloc::alloc::Allocator;
 
 /// Iterator over a [`HashMap`] which yields key-value pairs.
 ///
