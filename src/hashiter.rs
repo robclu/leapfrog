@@ -56,7 +56,7 @@ where
             let current = self.current;
             if let Some(cell) = self.map.get_cell_at_index(current) {
                 self.current = current + 1;
-                if cell.is_empty() {
+                if cell.is_empty() || cell.value.is_null() {
                     continue;
                 }
 
@@ -146,7 +146,7 @@ where
             let current = self.current;
             if let Some(cell) = self.map.get_cell_at_index(current) {
                 self.current = current + 1;
-                if cell.is_empty() {
+                if cell.is_empty() || cell.value.is_null() {
                     continue;
                 }
 
@@ -224,7 +224,7 @@ where
             let current = self.current;
             if let Some(cell) = self.map.get_cell_at_index_mut(current) {
                 self.current = current + 1;
-                if cell.is_empty() {
+                if cell.is_empty() || cell.value.is_null() {
                     continue;
                 }
 

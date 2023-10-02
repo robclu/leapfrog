@@ -97,6 +97,9 @@ where
     {
         loop {
             let value = self.cell.value.load(Ordering::Relaxed);
+            if value.is_null() {
+                return None;
+            }
             let key = self.cell.key.load(Ordering::Relaxed);
             if value.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
@@ -196,6 +199,9 @@ where
     {
         loop {
             let value = self.cell.value.load(Ordering::Relaxed);
+            if value.is_null() {
+                return None;
+            }
             let key = self.cell.key.load(Ordering::Relaxed);
             if value.is_redirect() || self.hash != self.cell.hash.load(Ordering::Relaxed) {
                 // Map has/is being migrated, help and then try again ...
