@@ -2,6 +2,7 @@
 
 use core::{
     alloc::Layout,
+    mem::{align_of, size_of},
     ops::{Add, BitOr, Shr, Sub, SubAssign},
 };
 
@@ -35,7 +36,7 @@ where
         + From<usize>,
 {
     let v = value - T::from(1);
-    let res = match std::mem::size_of::<T>() {
+    let res = match size_of::<T>() {
         1 => {
             let v = v | (v >> T::from(1));
             let v = v | (v >> T::from(2));
@@ -81,8 +82,8 @@ pub(crate) fn allocate<T, A: Allocator>(
     count: usize,
     kind: AllocationKind,
 ) -> *mut T {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
+    let size = size_of::<T>();
+    let align = align_of::<T>();
 
     // We unwrap here because we want to panic if we fail to get a valid layout
     let layout = Layout::from_size_align(size * count, align).unwrap();
@@ -96,8 +97,8 @@ pub(crate) fn allocate<T, A: Allocator>(
 
 /// Deallocates `count` number of elements of type T, using the `allocator`.
 pub(crate) fn deallocate<T, A: Allocator>(allocator: &A, ptr: *mut T, count: usize) {
-    let size = std::mem::size_of::<T>();
-    let align = std::mem::align_of::<T>();
+    let size = size_of::<T>();
+    let align = align_of::<T>();
 
     // We unwrap here because we want to panic if we fail to get a valid layout
     let layout = Layout::from_size_align(size * count, align).unwrap();
