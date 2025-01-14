@@ -38,11 +38,11 @@ pub(crate) type DefaultHash = std::collections::hash_map::DefaultHasher;
 /// Using a different hasher is as simple a reating the map using the
 /// `with_hasher` or `with_capacity_and_hasher` methods.
 ///
-/// Values stored in the map need to mplement the [`Value`] trait. The trait is
+/// Values stored in the map need to implement the [`Value`] trait. The trait is
 /// simple to implement, requiring that two values be reserved, one for the
 /// `null` case, which is used as a placeholder, and one for a `redirect`, which
 /// is used to signal that the map is being migrated. This trait is only implemented
-/// for numeric types and uses MAX and MAX -1 for the null and redirect values,
+/// for numeric types and uses (MAX - 1) and MAX for the null and redirect values,
 /// respectively. For any other type this needs to be implemented.
 ///
 /// This map is very fast for concurrent operations since the locking is either
