@@ -310,3 +310,19 @@ fn leapmap_iter_mut() {
         assert!(item.key_value().is_none());
     }
 }
+
+
+#[test]
+fn leapmap_try_insert() {
+    let map = LeapMap::new();
+    map.insert(1, 1);
+    map.remove(&1);
+    map.try_insert(1, 2);
+    let value = map.get(&1);
+
+    if let Some(mut val) = value {
+        assert_eq!(val.value(), Some(2));
+    } else {
+        panic!("LeapMap value is incorrect");
+    }
+}

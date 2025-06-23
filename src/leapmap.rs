@@ -1056,7 +1056,7 @@ where
             }
 
             // Otherwise try and exchange the old value with the new one.
-            if must_update {
+            if must_update || old_value.is_null() {
                 return Self::exchange_value(cell, value, old_value);
             } else {
                 // For non-updates, we use the replaced to return the existing
@@ -1112,7 +1112,7 @@ where
                         return ConcurrentInsertResult::Migration(value);
                     }
 
-                    if must_update {
+                    if must_update || old_value.is_null() {
                         return Self::exchange_value(cell, value, old_value);
                     } else {
                         return ConcurrentInsertResult::Replaced(old_value);
@@ -1168,7 +1168,7 @@ where
                     if x == 0 && probe_key == *key {
                         let old_value = cell.value.load(Ordering::Acquire);
 
-                        if must_update {
+                        if must_update || old_value.is_null() {
                             return Self::exchange_value(cell, value, old_value);
                         } else {
                             return ConcurrentInsertResult::Replaced(old_value);
