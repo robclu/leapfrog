@@ -1343,10 +1343,33 @@ impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
 
         let migrator_ptr = self.migrator.load(Ordering::SeqCst);
         if !migrator_ptr.is_null() {
-            let migrator = unsafe { &*migrator_ptr };
+            let migrator = unsafe { &mut *migrator_ptr };
+
+            // Free source tables that have been migrated from but are not yet in
+            // stale_sources.  After a successful migration the old source table
+            // stays in `migrator.sources` and is only moved to `stale_sources`
+            // during the *next* call to `initialize_migrator`.  If the map is
+            // dropped before a second migration these tables would never be freed.
+            for source in &migrator.sources {
+                let source_table_ptr = source.table.load(Ordering::Relaxed);
+                if !source_table_ptr.is_null() {
+                    let source_table = unsafe { &mut *source_table_ptr };
+                    let bucket_ptr = source_table.buckets;
+                    let bucket_count = source_table.size() >> 2;
+                    deallocate::<Bucket<K, V>, A>(&self.allocator, bucket_ptr, bucket_count);
+                    deallocate::<Table<K, V>, A>(&self.allocator, source_table_ptr, 1);
+                }
+            }
+
             while migrator.stale_tables_remaining() > 0 {
                 migrator.cleanup_stale_table(&self.allocator);
             }
+
+            // Call drop_in_place before deallocate so that the Vec fields inside
+            // Migrator (sources, stale_sources) have their destructors run and
+            // their backing heap buffers freed.  A plain deallocate only releases
+            // the raw bytes of the Migrator struct itself.
+            unsafe { std::ptr::drop_in_place(migrator_ptr) };
             deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
         }
     }
@@ -1819,5 +1842,72 @@ impl<K, V> Migrator<K, V> {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::alloc::{AllocError, Allocator};
+    use std::alloc::Layout;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A simple allocator wrapper that tracks total bytes currently allocated.
+    /// Used to verify that `LeapMap` frees all memory on drop.
+    struct CountingAllocator {
+        allocated: AtomicUsize,
+    }
+
+    unsafe impl Allocator for &CountingAllocator {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            if ptr.is_null() {
+                return Err(AllocError);
+            }
+            self.allocated.fetch_add(layout.size(), Ordering::Relaxed);
+            Ok(NonNull::slice_from_raw_parts(
+                unsafe { NonNull::new_unchecked(ptr) },
+                layout.size(),
+            ))
+        }
+
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            unsafe { std::alloc::dealloc(ptr.as_ptr(), layout) };
+            self.allocated.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+    }
+
+    /// Regression test for https://github.com/robclu/leapfrog/issues/16.
+    ///
+    /// When elements are inserted to fill the map beyond its load threshold a
+    /// migration (resize) is triggered.  The old source table is stored in
+    /// `migrator.sources` and is only moved to `migrator.stale_sources` during
+    /// the *next* migration.  If the map is dropped before a second migration
+    /// occurs those source tables are never freed, leaking ~218 MB per resize
+    /// cycle as reported in the issue.
+    #[test]
+    fn no_memory_leak_after_resize() {
+        let allocator = CountingAllocator {
+            allocated: AtomicUsize::new(0),
+        };
+
+        {
+            let map: LeapMap<usize, usize, BuildHasherDefault<DefaultHash>, &CountingAllocator> =
+                LeapMap::new_in(&allocator);
+            // Insert enough elements to trigger at least one resize.
+            // Initial capacity is 8, so 10_000 insertions will cause several migrations.
+            for i in 1..10_000usize {
+                map.insert(i, i);
+            }
+            // map is dropped here; all custom-allocator memory must be freed.
+        }
+
+        let leaked = allocator.allocated.load(Ordering::Relaxed);
+        assert_eq!(
+            leaked,
+            0,
+            "Memory leak: {leaked} bytes not freed after dropping LeapMap (issue #16)"
+        );
     }
 }
