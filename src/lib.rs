@@ -169,7 +169,6 @@ mod leapmap_serde;
 use crate::util::load_u64_le;
 
 use core::{
-    borrow::Borrow,
     default::Default,
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
@@ -229,15 +228,12 @@ value_impl!(i64, i64::MAX, i64::MAX - 1);
 value_impl!(usize, usize::MAX, usize::MAX - 1);
 
 /// Creates a hash value from the `hash_builder` and `value`.
-pub(crate) fn make_hash<K, Q, S>(hash_builder: &S, value: &Q) -> u64
+pub(crate) fn make_hash<Q, S>(hash_builder: &S, value: &Q) -> u64
 where
-    K: Borrow<Q>,
     Q: Hash + ?Sized,
     S: BuildHasher,
 {
-    let mut hasher = hash_builder.build_hasher();
-    value.hash(&mut hasher);
-    hasher.finish()
+    hash_builder.hash_one(value)
 }
 
 /// Implementation of a hasher which hashes using murmur.
@@ -283,7 +279,7 @@ impl Hasher for FnvHasher {
         let FnvHasher(mut hash) = *self;
 
         for byte in bytes.iter() {
-            hash = hash ^ (*byte as u64);
+            hash ^= *byte as u64;
             hash = hash.wrapping_mul(0x100000001b3);
         }
 

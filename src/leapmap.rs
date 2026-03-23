@@ -213,12 +213,12 @@ where
     }
 
     /// Returns the hashed value for the `key` as usize.
-    pub fn hash_usize<Q: ?Sized>(&self, key: &Q) -> usize
+    pub fn hash_usize<Q>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        make_hash::<K, Q, H>(&self.hash_builder, key) as usize
+        make_hash::<Q, H>(&self.hash_builder, key) as usize
     }
 
     /// Returns an optional reference type to the value corresponding to the key.
@@ -236,12 +236,12 @@ where
     /// }
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get<Q: ?Sized>(&'a self, key: &Q) -> Option<Ref<'a, K, V, H, A>>
+    pub fn get<Q>(&'a self, key: &Q) -> Option<Ref<'a, K, V, H, A>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
+        let hash = make_hash::<Q, H>(&self.hash_builder, key);
         self.find(key, hash).map(|cell| Ref::new(self, cell, hash))
     }
 
@@ -262,12 +262,12 @@ where
     /// assert_eq!(map.get(&1).unwrap().value(), Some(14));
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get_mut<Q: ?Sized>(&'a self, key: &Q) -> Option<RefMut<'a, K, V, H, A>>
+    pub fn get_mut<Q>(&'a self, key: &Q) -> Option<RefMut<'a, K, V, H, A>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
+        let hash = make_hash::<Q, H>(&self.hash_builder, key);
         self.find(key, hash)
             .map(|cell| RefMut::new(self, cell, hash))
     }
@@ -282,10 +282,10 @@ where
     /// assert_eq!(map.contains_key(&1), true);
     /// assert_eq!(map.contains_key(&2), false);
     /// ```
-    pub fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         self.get(key).is_some()
     }
@@ -301,12 +301,12 @@ where
     /// assert_eq!(map.remove(&2), Some(17));
     /// assert_eq!(map.remove(&2), None);
     /// ```
-    pub fn remove<Q: ?Sized>(&self, key: &Q) -> Option<V>
+    pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
+        let hash = make_hash::<Q, H>(&self.hash_builder, key);
         self.find(key, hash).and_then(|cell| self.erase_value(cell))
     }
 
@@ -324,12 +324,12 @@ where
     /// assert_eq!(map.insert(&37, 12), None);
     /// assert_eq!(map.update(&37, 14), Some(12));
     /// ```
-    pub fn update<Q: ?Sized>(&self, key: &Q, value: V) -> Option<V>
+    pub fn update<Q>(&self, key: &Q, value: V) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        let hash = make_hash::<K, _, H>(&self.hash_builder, key);
+        let hash = make_hash(&self.hash_builder, key);
         debug_assert!(!value.is_null());
 
         loop {
@@ -376,7 +376,7 @@ where
     /// assert_eq!(map.insert(37, 14), Some(12));
     /// ```
     pub fn insert(&self, key: K, mut value: V) -> Option<V> {
-        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+        let hash = make_hash(&self.hash_builder, &key);
         debug_assert!(!value.is_null());
 
         loop {
@@ -442,7 +442,7 @@ where
     /// assert_eq!(map.try_insert(37, 14), Some(12));
     /// ```
     pub fn try_insert(&self, key: K, mut value: V) -> Option<V> {
-        let hash = make_hash::<K, _, H>(&self.hash_builder, &key);
+        let hash = make_hash(&self.hash_builder, &key);
         debug_assert!(!value.is_null());
 
         loop {
@@ -591,10 +591,10 @@ where
 
     /// Tries to find the value for the `hash`, without inserting into the map.
     /// This will reuturn a reference to the cell if the find succeeded.
-    pub(crate) fn find<Q: ?Sized>(&self, key: &Q, hash: HashedKey) -> Option<&'a AtomicCell<K, V>>
+    pub(crate) fn find<Q>(&self, key: &Q, hash: HashedKey) -> Option<&'a AtomicCell<K, V>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         debug_assert!(hash != null_hash());
 
@@ -625,7 +625,7 @@ where
     /// `buckets`, which have an assosciated `size_mask` representing the number
     /// of cells in the buckets. This returns a reference to the cell if the
     /// find was successful.
-    fn find_inner<Q: ?Sized>(
+    fn find_inner<Q>(
         &self,
         key: &Q,
         hash: HashedKey,
@@ -634,7 +634,7 @@ where
     ) -> Option<&'a AtomicCell<K, V>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         let mut index = hash as usize & size_mask;
         let cell = get_cell(buckets, index, size_mask);

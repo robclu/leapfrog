@@ -57,8 +57,8 @@ impl Environment {
             vals1,
             vals2,
             ind_dist: Uniform::from(0..NUM_KEYS - 1),
-            val_dist1: Uniform::from(Value::min_value()..Value::max_value() - 2),
-            val_dist2: Uniform::from(Value::min_value()..Value::max_value() - 2),
+            val_dist1: Uniform::from(Value::MIN..Value::MAX - 2),
+            val_dist2: Uniform::from(Value::MIN..Value::MAX - 2),
             in_table,
             in_use,
             finished: AtomicBool::new(false),
@@ -82,16 +82,13 @@ fn stress_insert_thread(env: Arc<Environment>) {
             let val1 = env.val_dist1.sample(&mut rng);
             let val2 = env.val_dist2.sample(&mut rng);
             let res1 = if !env.table1.contains_key(&key) {
-                env.table1.insert(key, val1).map_or(true, |_| false)
+                env.table1.insert(key, val1).is_none_or(|_| false)
             } else {
                 false
             };
 
             let res2 = if !env.table2.contains_key(&key) {
-                match env.table2.insert(key, val2) {
-                    Some(_) => false,
-                    None => true,
-                }
+                env.table2.insert(key, val2).is_none()
             } else {
                 false
             };
@@ -122,8 +119,8 @@ fn stress_delete_thread(env: Arc<Environment>) {
         {
             let key = env.keys[idx];
             let in_table = env.in_table[idx].load(Ordering::Relaxed);
-            let res1 = env.table1.remove(&key).map_or(false, |_| true);
-            let res2 = env.table2.remove(&key).map_or(false, |_| true);
+            let res1 = env.table1.remove(&key).is_some_and(|_| true);
+            let res2 = env.table2.remove(&key).is_some_and(|_| true);
             if res1 != in_table {
                 println!("Error: {} {}", key, env.vals1[idx].load(Ordering::Relaxed));
             }
@@ -184,8 +181,8 @@ fn stress_update_thread(env: Arc<Environment>) {
 
             // Change this if we add update_fn and/or upsert_fn
             let res = {
-                let res1 = env.table1.update(&key, val1).map_or(false, |_| true);
-                let res2 = env.table2.update(&key, val2).map_or(false, |_| true);
+                let res1 = env.table1.update(&key, val1).is_some_and(|_| true);
+                let res2 = env.table2.update(&key, val2).is_some_and(|_| true);
                 assert_eq!(res1, in_table);
                 assert_eq!(res2, in_table);
                 res1

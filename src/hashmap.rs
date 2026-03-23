@@ -11,7 +11,7 @@ use crate::{
 use core::{
     borrow::Borrow,
     default::Default,
-    hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
+    hash::{BuildHasher, BuildHasherDefault, Hash},
 };
 
 #[cfg(feature = "stable_alloc")]
@@ -163,12 +163,12 @@ where
     }
 
     /// Returns the hashed value for the `key` as usize.
-    pub fn hash_usize<Q: ?Sized>(&self, key: &Q) -> usize
+    pub fn hash_usize<Q>(&self, key: &Q) -> usize
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        make_hash::<K, Q, H>(&self.hash_builder, key) as usize
+        make_hash::<Q, H>(&self.hash_builder, key) as usize
     }
 
     /// Inserts a key-value pair into the map.
@@ -186,9 +186,7 @@ where
     /// assert_eq!(map.insert(37, 14), Some(12));
     /// ```
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let mut state = self.hash_builder.build_hasher();
-        key.hash(&mut state);
-        let hash = state.finish();
+        let hash = self.hash_builder.hash_one(&key);
         debug_assert!(hash != null_hash());
         loop {
             let size_mask = self.get_table().size_mask;
@@ -227,12 +225,12 @@ where
     /// }
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get<Q: ?Sized>(&'a self, key: &Q) -> Option<&'a V>
+    pub fn get<Q>(&'a self, key: &Q) -> Option<&'a V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
+        self.find(make_hash::<Q, H>(&self.hash_builder, key), key)
             .and_then(|(_k, v)| if v.is_null() { None } else { Some(v) })
     }
 
@@ -249,15 +247,15 @@ where
     /// assert_eq!(*map.get(&1).unwrap(), 14);
     /// assert!(map.get(&2).is_none());
     ///```
-    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&'a mut V>
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&'a mut V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         let table = self.get_table_mut();
         let size_mask = table.size_mask;
         let buckets = table.bucket_slice_mut();
-        let hash = make_hash::<K, Q, H>(&self.hash_builder, key);
+        let hash = make_hash::<Q, H>(&self.hash_builder, key);
         Self::find_mut(buckets, hash, key, size_mask).and_then(|old| {
             if old.is_null() {
                 None
@@ -281,12 +279,12 @@ where
     /// assert_eq!(map.get_key_value(&1), Some((&1, &12)));
     /// assert!(map.get(&2).is_none());
     /// ```
-    pub fn get_key_value<Q: ?Sized>(&self, key: &Q) -> Option<(&K, &V)>
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
-        self.find(make_hash::<K, Q, H>(&self.hash_builder, key), key)
+        self.find(make_hash::<Q, H>(&self.hash_builder, key), key)
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -331,10 +329,10 @@ where
     /// assert_eq!(map.contains_key(&1), true);
     /// assert_eq!(map.contains_key(&2), false);
     /// ```
-    pub fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         self.get(key).is_some()
     }
@@ -350,10 +348,10 @@ where
     /// assert_eq!(map.remove(&2), Some(17));
     /// assert_eq!(map.remove(&2), None);
     /// ```
-    pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: ?Sized + Hash + Eq,
     {
         // Here, we could shuffle the existing cells so that the gaps left
         // by this cell are filled in. However, we rather just leave them as
@@ -703,21 +701,21 @@ where
 
         // Since AtomicU8 and AtomicU64 are the same as u8 and u64 in memory,
         // we can write them as zero, rather than calling the atomic versions
-        for i in 0..bucket_count {
+        for bucket in buckets.iter_mut().take(bucket_count) {
             unsafe {
-                let bucket_deltas = &mut buckets[i].deltas as *mut u8;
+                let bucket_deltas = &mut bucket.deltas as *mut u8;
                 std::ptr::write_bytes(bucket_deltas, 0, 8);
             };
 
             for cell in 0..4 {
                 // FIXME: How to initialize keys?
                 unsafe {
-                    let cell_hash: *mut HashedKey = &mut buckets[i].cells[cell].hash;
+                    let cell_hash: *mut HashedKey = &mut bucket.cells[cell].hash;
                     std::ptr::write_bytes(cell_hash, 0, 1);
                 };
 
                 // FIXME: We should check if the stored type is directly writable ..
-                let cell_value = &mut buckets[i].cells[cell].value;
+                let cell_value = &mut bucket.cells[cell].value;
                 *cell_value = V::null();
             }
         }
@@ -856,10 +854,10 @@ where
     }
 }
 
-impl<'a, K, V, H, A> Clone for HashMap<K, V, H, A>
+impl<K, V, H, A> Clone for HashMap<K, V, H, A>
 where
-    K: Eq + Hash + Clone + 'a,
-    V: Value + 'a,
+    K: Eq + Hash + Clone,
+    V: Value,
     H: BuildHasher + Default,
     A: Allocator + Clone,
 {
