@@ -115,6 +115,16 @@ impl<'a, K, V, H, A: Allocator> LeapMap<K, V, H, A> {
     }
 }
 
+impl<K, V> Default for LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global>
+where
+    K: Eq + Hash + Copy,
+    V: Value,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K, V> LeapMap<K, V, BuildHasherDefault<DefaultHash>, Global>
 where
     K: Eq + Hash + Copy,
