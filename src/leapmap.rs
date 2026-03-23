@@ -1367,8 +1367,10 @@ impl<K, V, H, A: Allocator> Drop for LeapMap<K, V, H, A> {
 
             // Call drop_in_place before deallocate so that the Vec fields inside
             // Migrator (sources, stale_sources) have their destructors run and
-            // their backing heap buffers freed.  A plain deallocate only releases
+            // their backing heap buffers freed. A plain deallocate only releases
             // the raw bytes of the Migrator struct itself.
+            //
+            // Regression coverage: `migrator_drop_runs_when_leapmap_is_dropped`.
             unsafe { std::ptr::drop_in_place(migrator_ptr) };
             deallocate::<Migrator<K, V>, A>(&self.allocator, migrator_ptr, 1);
         }
@@ -1853,6 +1855,14 @@ mod tests {
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    static MIGRATOR_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    impl<K, V> Drop for Migrator<K, V> {
+        fn drop(&mut self) {
+            MIGRATOR_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// A simple allocator wrapper that tracks total bytes currently allocated.
     /// Used to verify that `LeapMap` frees all memory on drop.
     struct CountingAllocator {
@@ -1905,9 +1915,37 @@ mod tests {
 
         let leaked = allocator.allocated.load(Ordering::Relaxed);
         assert_eq!(
-            leaked,
-            0,
+            leaked, 0,
             "Memory leak: {leaked} bytes not freed after dropping LeapMap (issue #16)"
         );
+    }
+
+    /// Regression test for missing `drop_in_place` on `Migrator`.
+    ///
+    /// `LeapMap` allocates `Migrator` manually and stores it behind a raw pointer.
+    /// If `Drop for LeapMap` only deallocates the raw `Migrator` bytes (without
+    /// calling `drop_in_place` first), field destructors never run. In particular,
+    /// `Migrator` contains Vec fields (`sources`, `stale_sources`) whose backing
+    /// buffers are then leaked.
+    ///
+    /// We need an explicit test for this because this failure mode is easy to
+    /// reintroduce during refactors of unsafe drop code: a direct `deallocate`
+    /// still compiles and may look correct in review, but silently bypasses field
+    /// destructors. The leak can also be hard to notice in normal functional tests
+    /// because map operations still behave correctly while memory usage grows.
+    ///
+    /// This test keeps the map empty and only checks that `Migrator::drop` runs.
+    /// That isolates the destructor path directly instead of relying on allocator
+    /// accounting from resize/source-table cleanup behavior.
+    #[test]
+    fn migrator_drop_runs_when_leapmap_is_dropped() {
+        MIGRATOR_DROPS.store(0, Ordering::Relaxed);
+
+        {
+            let map: LeapMap<usize, usize> = LeapMap::new();
+            drop(map);
+        }
+
+        assert_eq!(MIGRATOR_DROPS.load(Ordering::Relaxed), 1);
     }
 }
