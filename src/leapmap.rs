@@ -784,22 +784,20 @@ where
         // Check if there are any old source tables, and move them to the cleanup
         // queue:
         let last_source = migrator.last_stale_source.load(Ordering::Relaxed);
-        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed);
+        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed) as usize;
+        migrator.sources.truncate(num_sources);
         migrator.num_source_tables.store(0, Ordering::Relaxed);
 
         for i in 0..num_sources {
             let source = migrator.sources.pop().unwrap();
-            let index = migrator.stale_source_index((last_source + i) as usize);
-
-            // If this is not null, then we have wrapped:
-            // FIXME: This occasionally causes a panic in the tests!
+            let index = migrator.stale_source_index(last_source as usize + i);
             debug_assert!(migrator.stale_sources[index]
-                .load(Ordering::Relaxed)
+                .load(Ordering::Acquire)
                 .is_null());
 
             migrator.stale_sources[index]
                 .store(source.table.load(Ordering::Relaxed), Ordering::Relaxed);
-            let _old = migrator.last_stale_source.fetch_add(1, Ordering::Relaxed);
+            let _old = migrator.last_stale_source.fetch_add(1, Ordering::Release);
         }
 
         let source = MigrationSource::<K, V> {
@@ -810,8 +808,44 @@ where
             migrator.sources.push(source);
         } else {
             migrator.sources[0] = source;
+            migrator.sources.truncate(1);
         }
         migrator.num_source_tables.store(1, Ordering::Relaxed);
+    }
+
+    /// Prepares another migration pass after the current destination overflowed.
+    ///
+    /// The partially filled destination becomes an additional source so entries
+    /// already redirected out of older tables remain reachable.
+    fn prepare_retry_after_overflow(allocator: &A, migrator: &mut Migrator<K, V>) {
+        let table_ptr = migrator.dst_table.load(Ordering::Relaxed);
+        let table = unsafe { &*table_ptr };
+        let active_sources = migrator.num_source_tables.load(Ordering::Relaxed) as usize;
+        migrator.sources.truncate(active_sources);
+
+        let mut remaining_units = Self::remaining_units(table.size_mask);
+        for source in migrator.sources.iter().take(active_sources) {
+            remaining_units += Self::remaining_units(source.size());
+            source.index.store(0, Ordering::Relaxed);
+        }
+
+        migrator.sources.push(MigrationSource {
+            table: AtomicPtr::new(table_ptr),
+            index: AtomicUsize::new(0),
+        });
+        migrator
+            .num_source_tables
+            .store((active_sources + 1) as u32, Ordering::Relaxed);
+        migrator
+            .remaining_units
+            .store(remaining_units, Ordering::Relaxed);
+        migrator.overflowed.store(false, Ordering::Relaxed);
+
+        let new_dst_table_ptr = Self::allocate_and_init_table(allocator, (table.size_mask + 1) * 2);
+        migrator
+            .dst_table
+            .store(new_dst_table_ptr, Ordering::Relaxed);
+
     }
 
     /// Makes the calling thread participate in the migtration.
@@ -825,10 +859,15 @@ where
 
         // First check if that migration is in the completion stage,
         // in which case we should go and clean up some of the old
-        // migration tables.
+        // migration tables.  We spin only while the completion flag is
+        // actively set (not when status == 0, which means the migration
+        // is fully done and we can move on).
         if migrator.finishing() {
-            while migrator.finishing() {
-                // Clean up old tables, then return:
+            loop {
+                let s = migrator.status.load(Ordering::Acquire);
+                if s & Migrator::<K, V>::MIGRATION_COMPLETE_FLAG == 0 {
+                    break;
+                }
                 migrator.cleanup_stale_table(&self.allocator);
             }
             return;
@@ -859,7 +898,15 @@ where
                 // Migration is finished, we can break
                 return;
             }
-            // Last bit is flag for completion, hence + 8:
+            if status & Migrator::<K, V>::INITIALIZATION_MASK
+                != Migrator::<K, V>::INITIALIZATION_MASK
+            {
+                // Migration not initialized or already completed (stale
+                // check from participate_in_migration).  Bail out so we
+                // don't join a non-existent migration.
+                return;
+            }
+            // Low 3 bits are flags, worker count lives in bits 3+, hence + 8:
             match migrator.status.compare_exchange(
                 status,
                 status + 8,
@@ -872,7 +919,8 @@ where
         }
 
         // Iterate over all source tables
-        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed);
+        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed) as usize;
+        debug_assert!(num_sources <= migrator.sources.len());
         for i in 0..num_sources {
             let mut finished = false;
             loop {
@@ -881,13 +929,9 @@ where
                     break;
                 }
 
-                // FIXME: This should not be here
-                if i as usize >= migrator.sources.len() {
-                    break;
-                }
-
-                let source = &migrator.sources[i as usize];
-                // Check if this source has finished migration and we can move on:
+                let source = &migrator.sources[i];
+                // Check if this source has finished migration and we can move
+                // on:
                 let start_index = source
                     .index
                     .fetch_add(Self::MIGRATION_UNIT_SIZE, Ordering::Relaxed);
@@ -895,16 +939,17 @@ where
                     break;
                 }
 
-                // Check if the migration failed due to overflow in the destination
-                // table. Since this source caused an overflow, the migration can't
-                // complete for any thread because this unit will never complete.
-                // Multiple threads may overflow concurrently.
-                // We need to notify all threads of the overflow, so that they are
-                // flushed an we can safely deal with the overflow.
+                // Check if the migration failed due to overflow in the
+                // destination table. Since this source caused an overflow, the
+                // migration can't complete for any thread because this unit
+                // will never complete.  Multiple threads may overflow
+                // concurrently.  We need to notify all threads of the overflow,
+                // so that they are flushed and we can safely deal with the
+                // overflow.
                 let end_index = start_index + Self::MIGRATION_UNIT_SIZE;
-                if !migrator.migrate_range::<H, A>(i as usize, start_index, end_index) {
+                if !migrator.migrate_range::<H, A>(i, start_index, end_index) {
                     migrator.overflowed.store(true, Ordering::Relaxed);
-                    let _old = migrator.status.fetch_or(1, Ordering::Relaxed);
+                    let _old = migrator.status.fetch_or(1, Ordering::Release);
                     finished = true;
                     break;
                 }
@@ -912,7 +957,7 @@ where
                 // Successfully migrated some of the units, update status and
                 // then either try again or we are done:
                 if migrator.remaining_units.fetch_sub(1, Ordering::Relaxed) == 1 {
-                    let _old = migrator.status.fetch_or(1, Ordering::Relaxed);
+                    let _old = migrator.status.fetch_or(1, Ordering::Release);
                     finished = true;
                     break;
                 }
@@ -945,53 +990,46 @@ where
         // other threads will be able to see that the migration is still in
         // progress but is in the completion stage.
         debug_assert!(prev_status == 15);
-        if migrator.overflowed.load(Ordering::Relaxed) {
-            // Overflow of destination table, move the destination table to be
-            // a source in the migrator, create a new destination table, and
-            // then break so that we can try again.
-            let table_ptr = migrator.dst_table.load(Ordering::Relaxed);
-            let table = unsafe { &*table_ptr };
 
-            let mut remaining_units = Self::remaining_units(table.size_mask);
-            for source in &migrator.sources {
-                remaining_units += Self::remaining_units(source.size());
-                source.index.store(0, Ordering::Relaxed);
+        // If the destination overflowed, the last worker drives the retry
+        // single-handedly while all other workers spin in the wait loop above.
+        // Each retry doubles the destination, so this converges quickly.
+        while migrator.overflowed.load(Ordering::Acquire) {
+            Self::prepare_retry_after_overflow(allocator, migrator);
+            Self::drive_retry_migration(migrator);
+        }
+
+        // Migration was successful, we can update the migrator. Here
+        // we only set the variables which we need to:
+        let new_table_ptr = migrator.dst_table.load(Ordering::Relaxed);
+        dst_table.store(new_table_ptr, Ordering::Release);
+
+        migrator.overflowed.store(false, Ordering::Relaxed);
+
+        // We don't move the source tables here, rather, we wait until the
+        // next migration and add them to the cleanup queue then.
+
+        // Finally we can set that we are done!
+        migrator.status.store(0, Ordering::Release);
+    }
+
+    /// Drives a retry migration round single-threaded (called by the last
+    /// worker only, while all other workers spin).  Iterates every source
+    /// completely, migrating into the current destination table.
+    fn drive_retry_migration(migrator: &mut Migrator<K, V>) {
+        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed) as usize;
+        for i in 0..num_sources {
+            let source = &migrator.sources[i];
+            let source_size = source.size();
+            let mut start_index = 0;
+            while start_index < source_size {
+                let end_index = start_index + Self::MIGRATION_UNIT_SIZE;
+                if !migrator.migrate_range::<H, A>(i, start_index, end_index) {
+                    migrator.overflowed.store(true, Ordering::Relaxed);
+                    return;
+                }
+                start_index = end_index;
             }
-
-            migrator.sources.push(MigrationSource {
-                table: AtomicPtr::new(table_ptr),
-                index: AtomicUsize::new(0),
-            });
-
-            migrator
-                .remaining_units
-                .store(remaining_units, Ordering::Relaxed);
-
-            // Create the new table for the migrator:
-            let new_dst_table_ptr =
-                Self::allocate_and_init_table(allocator, (table.size_mask + 1) * 2);
-            migrator
-                .dst_table
-                .store(new_dst_table_ptr, Ordering::Relaxed);
-
-            // Finally we can set that we are done!
-            migrator.status.store(0, Ordering::Relaxed);
-        } else {
-            // Migration was successful, we can update the migrator. Here
-            // we only set the variables which we need to:
-            let new_table_ptr = migrator.dst_table.load(Ordering::Relaxed);
-            dst_table.store(new_table_ptr, Ordering::Release);
-
-            migrator.overflowed.store(false, Ordering::Relaxed);
-            //migrator
-            //    .dst_table
-            //    .store(std::ptr::null_mut(), Ordering::Relaxed);
-
-            // We don't move the source tables here, rather, we wait until the
-            // next mogration and add them to the cleanup queue then.
-
-            // Finally we can set that we are done!
-            migrator.status.store(0, Ordering::Release);
         }
     }
 
@@ -1476,6 +1514,14 @@ const fn get_cell_index(index: usize) -> usize {
     index & 3
 }
 
+fn deallocate_table<K, V, A: Allocator>(allocator: &A, table_ptr: *mut Table<K, V>) {
+    let table = unsafe { &mut *table_ptr };
+    let bucket_ptr = table.buckets;
+    let bucket_count = table.size() >> 2;
+    deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
+    deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
+}
+
 /// The type used for hashed keys.
 type HashedKey = u64;
 
@@ -1511,12 +1557,12 @@ struct Table<K, V> {
 impl<K, V> Table<K, V> {
     /// Gets a mutable slice of the table buckets.
     pub(super) fn bucket_slice_mut(&mut self) -> &mut [Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size()) }
+        unsafe { std::slice::from_raw_parts_mut(self.buckets, self.size() >> 2) }
     }
 
     /// Gets a slice of the table buckets.
     pub(super) fn bucket_slice(&self) -> &[Bucket<K, V>] {
-        unsafe { std::slice::from_raw_parts(self.buckets, self.size()) }
+        unsafe { std::slice::from_raw_parts(self.buckets, self.size() >> 2) }
     }
 
     /// Returns the number of cells in the table.
@@ -1644,7 +1690,7 @@ impl<K, V> Migrator<K, V> {
     fn set_initialization_begin_flag(&self) -> bool {
         let old = self
             .status
-            .fetch_or(Self::INITIALIZATION_START_FLAG, Ordering::Relaxed);
+            .fetch_or(Self::INITIALIZATION_START_FLAG, Ordering::AcqRel);
         old & Self::INITIALIZATION_START_FLAG == 0
     }
 
@@ -1654,26 +1700,26 @@ impl<K, V> Migrator<K, V> {
     fn set_initialization_complete_flag(&self) -> bool {
         let old = self
             .status
-            .fetch_or(Self::INITIALIZATION_END_FLAG, Ordering::Relaxed);
+            .fetch_or(Self::INITIALIZATION_END_FLAG, Ordering::Release);
         old & Self::INITIALIZATION_END_FLAG == 0
     }
 
     /// If the migrator has completed/is completing the migration.
     fn finishing(&self) -> bool {
-        let status = self.status.load(Ordering::Relaxed);
+        let status = self.status.load(Ordering::Acquire);
         status & Self::MIGRATION_COMPLETE_FLAG == Self::MIGRATION_COMPLETE_FLAG || status == 0
     }
 
     /// If the migrator has completed initialization
     fn initialization_complete(&self) -> bool {
-        self.status.load(Ordering::Relaxed) & Self::INITIALIZATION_MASK == Self::INITIALIZATION_MASK
+        self.status.load(Ordering::Acquire) & Self::INITIALIZATION_MASK == Self::INITIALIZATION_MASK
     }
 
     /// This returns true if the migrator is in process, which is the time from
     /// which the initialization flag is set until the time at which the thread
     /// which finishes the migration sets the status to zero.
     fn in_process(&self) -> bool {
-        self.status.load(Ordering::Relaxed) & Self::INITIALIZATION_START_FLAG
+        self.status.load(Ordering::Acquire) & Self::INITIALIZATION_START_FLAG
             == Self::INITIALIZATION_START_FLAG
     }
 
@@ -1684,14 +1730,14 @@ impl<K, V> Migrator<K, V> {
 
     /// Returns the number of stale source tables to clean up.
     fn stale_tables_remaining(&self) -> u32 {
-        self.last_stale_source.load(Ordering::Relaxed)
+        self.last_stale_source.load(Ordering::Acquire)
             - self.current_stale_source.load(Ordering::Relaxed)
     }
 
     /// Tries to clean up (deallocate) any stale source tables.
     fn cleanup_stale_table<A: Allocator>(&self, allocator: &A) {
         let current = self.current_stale_source.load(Ordering::Relaxed);
-        let last_visible = self.last_stale_source.load(Ordering::Relaxed);
+        let last_visible = self.last_stale_source.load(Ordering::Acquire);
 
         // Check if there are any old source tables to clean up
         if current >= last_visible {
@@ -1701,22 +1747,17 @@ impl<K, V> Migrator<K, V> {
         // There are sources to clean up, try and get one:
         if self
             .current_stale_source
-            .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             // Won the race, we can deallocate the stale source for our index:
             let index = self.stale_source_index(current as usize);
-            let table_ptr = self.stale_sources[index].load(Ordering::Relaxed);
+            let table_ptr = self.stale_sources[index].swap(std::ptr::null_mut(), Ordering::AcqRel);
             if table_ptr.is_null() {
                 return;
             }
 
-            let table = unsafe { &mut *table_ptr };
-            let bucket_ptr = table.buckets;
-            let bucket_count = table.size() >> 2;
-            deallocate::<Bucket<K, V>, A>(allocator, bucket_ptr, bucket_count);
-            deallocate::<Table<K, V>, A>(allocator, table_ptr, 1);
-            self.stale_sources[index].store(std::ptr::null_mut(), Ordering::Relaxed);
+            deallocate_table::<K, V, A>(allocator, table_ptr);
         }
 
         // Lost the race, just return.
@@ -1957,5 +1998,72 @@ mod tests {
         }
 
         assert_eq!(MIGRATOR_DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn overflow_retry_keeps_migration_live() {
+        let allocator = Global;
+        let mut migrator = Migrator {
+            dst_table: AtomicPtr::new(std::ptr::null_mut()),
+            sources: Vec::new(),
+            status: AtomicUsize::new(0),
+            remaining_units: AtomicUsize::new(0),
+            overflowed: AtomicBool::new(false),
+            num_source_tables: AtomicU32::new(0),
+            stale_sources: Vec::new(),
+            last_stale_source: AtomicU32::new(0),
+            current_stale_source: AtomicU32::new(0),
+        };
+        migrator.initialize();
+
+        let source_table = LeapMap::<u64, u64>::allocate_and_init_table(&allocator, 8);
+        let overflowed_dst = LeapMap::<u64, u64>::allocate_and_init_table(&allocator, 16);
+        migrator.sources.push(MigrationSource {
+            table: AtomicPtr::new(source_table),
+            index: AtomicUsize::new(7),
+        });
+        migrator.num_source_tables.store(1, Ordering::Relaxed);
+        migrator.dst_table.store(overflowed_dst, Ordering::Relaxed);
+        migrator.overflowed.store(true, Ordering::Relaxed);
+        migrator.status.store(
+            Migrator::<u64, u64>::INITIALIZATION_MASK | 1,
+            Ordering::Relaxed,
+        );
+
+        LeapMap::<u64, u64>::prepare_retry_after_overflow(&allocator, &mut migrator);
+
+        let new_dst = migrator.dst_table.load(Ordering::Relaxed);
+        let expected_units =
+            LeapMap::<u64, u64>::remaining_units(unsafe { &*source_table }.size_mask)
+                + LeapMap::<u64, u64>::remaining_units(unsafe { &*overflowed_dst }.size_mask);
+
+        assert_eq!(migrator.num_source_tables.load(Ordering::Relaxed), 2);
+        assert_eq!(migrator.sources.len(), 2);
+        assert_eq!(
+            migrator.sources[0].table.load(Ordering::Relaxed),
+            source_table
+        );
+        assert_eq!(migrator.sources[0].index.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            migrator.sources[1].table.load(Ordering::Relaxed),
+            overflowed_dst
+        );
+        assert_eq!(migrator.sources[1].index.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            migrator.remaining_units.load(Ordering::Relaxed),
+            expected_units
+        );
+        assert!(!migrator.overflowed.load(Ordering::Relaxed));
+        // Status is not modified by prepare_retry_after_overflow; the caller
+        // (perform_migration) stores 0 after driving the retry to completion.
+        assert_eq!(
+            migrator.status.load(Ordering::Acquire),
+            Migrator::<u64, u64>::INITIALIZATION_MASK | 1,
+        );
+        assert_ne!(new_dst, overflowed_dst);
+
+        deallocate_table::<u64, u64, Global>(&allocator, source_table);
+        deallocate_table::<u64, u64, Global>(&allocator, overflowed_dst);
+        deallocate_table::<u64, u64, Global>(&allocator, new_dst);
     }
 }
