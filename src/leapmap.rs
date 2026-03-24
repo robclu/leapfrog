@@ -846,10 +846,6 @@ where
             .dst_table
             .store(new_dst_table_ptr, Ordering::Relaxed);
 
-        // Publish the new sources/destination as a live migration round.
-        migrator
-            .status
-            .store(Migrator::<K, V>::INITIALIZATION_MASK, Ordering::Release);
     }
 
     /// Makes the calling thread participate in the migtration.
@@ -863,10 +859,15 @@ where
 
         // First check if that migration is in the completion stage,
         // in which case we should go and clean up some of the old
-        // migration tables.
+        // migration tables.  We spin only while the completion flag is
+        // actively set (not when status == 0, which means the migration
+        // is fully done and we can move on).
         if migrator.finishing() {
-            while migrator.finishing() {
-                // Clean up old tables, then return:
+            loop {
+                let s = migrator.status.load(Ordering::Acquire);
+                if s & Migrator::<K, V>::MIGRATION_COMPLETE_FLAG == 0 {
+                    break;
+                }
                 migrator.cleanup_stale_table(&self.allocator);
             }
             return;
@@ -897,7 +898,15 @@ where
                 // Migration is finished, we can break
                 return;
             }
-            // Last bit is flag for completion, hence + 8:
+            if status & Migrator::<K, V>::INITIALIZATION_MASK
+                != Migrator::<K, V>::INITIALIZATION_MASK
+            {
+                // Migration not initialized or already completed (stale
+                // check from participate_in_migration).  Bail out so we
+                // don't join a non-existent migration.
+                return;
+            }
+            // Low 3 bits are flags, worker count lives in bits 3+, hence + 8:
             match migrator.status.compare_exchange(
                 status,
                 status + 8,
@@ -921,7 +930,8 @@ where
                 }
 
                 let source = &migrator.sources[i];
-                // Check if this source has finished migration and we can move on:
+                // Check if this source has finished migration and we can move
+                // on:
                 let start_index = source
                     .index
                     .fetch_add(Self::MIGRATION_UNIT_SIZE, Ordering::Relaxed);
@@ -929,12 +939,13 @@ where
                     break;
                 }
 
-                // Check if the migration failed due to overflow in the destination
-                // table. Since this source caused an overflow, the migration can't
-                // complete for any thread because this unit will never complete.
-                // Multiple threads may overflow concurrently.
-                // We need to notify all threads of the overflow, so that they are
-                // flushed an we can safely deal with the overflow.
+                // Check if the migration failed due to overflow in the
+                // destination table. Since this source caused an overflow, the
+                // migration can't complete for any thread because this unit
+                // will never complete.  Multiple threads may overflow
+                // concurrently.  We need to notify all threads of the overflow,
+                // so that they are flushed and we can safely deal with the
+                // overflow.
                 let end_index = start_index + Self::MIGRATION_UNIT_SIZE;
                 if !migrator.migrate_range::<H, A>(i, start_index, end_index) {
                     migrator.overflowed.store(true, Ordering::Relaxed);
@@ -979,24 +990,46 @@ where
         // other threads will be able to see that the migration is still in
         // progress but is in the completion stage.
         debug_assert!(prev_status == 15);
-        if migrator.overflowed.load(Ordering::Acquire) {
+
+        // If the destination overflowed, the last worker drives the retry
+        // single-handedly while all other workers spin in the wait loop above.
+        // Each retry doubles the destination, so this converges quickly.
+        while migrator.overflowed.load(Ordering::Acquire) {
             Self::prepare_retry_after_overflow(allocator, migrator);
-        } else {
-            // Migration was successful, we can update the migrator. Here
-            // we only set the variables which we need to:
-            let new_table_ptr = migrator.dst_table.load(Ordering::Relaxed);
-            dst_table.store(new_table_ptr, Ordering::Release);
+            Self::drive_retry_migration(migrator);
+        }
 
-            migrator.overflowed.store(false, Ordering::Relaxed);
-            //migrator
-            //    .dst_table
-            //    .store(std::ptr::null_mut(), Ordering::Relaxed);
+        // Migration was successful, we can update the migrator. Here
+        // we only set the variables which we need to:
+        let new_table_ptr = migrator.dst_table.load(Ordering::Relaxed);
+        dst_table.store(new_table_ptr, Ordering::Release);
 
-            // We don't move the source tables here, rather, we wait until the
-            // next mogration and add them to the cleanup queue then.
+        migrator.overflowed.store(false, Ordering::Relaxed);
 
-            // Finally we can set that we are done!
-            migrator.status.store(0, Ordering::Release);
+        // We don't move the source tables here, rather, we wait until the
+        // next migration and add them to the cleanup queue then.
+
+        // Finally we can set that we are done!
+        migrator.status.store(0, Ordering::Release);
+    }
+
+    /// Drives a retry migration round single-threaded (called by the last
+    /// worker only, while all other workers spin).  Iterates every source
+    /// completely, migrating into the current destination table.
+    fn drive_retry_migration(migrator: &mut Migrator<K, V>) {
+        let num_sources = migrator.num_source_tables.load(Ordering::Relaxed) as usize;
+        for i in 0..num_sources {
+            let source = &migrator.sources[i];
+            let source_size = source.size();
+            let mut start_index = 0;
+            while start_index < source_size {
+                let end_index = start_index + Self::MIGRATION_UNIT_SIZE;
+                if !migrator.migrate_range::<H, A>(i, start_index, end_index) {
+                    migrator.overflowed.store(true, Ordering::Relaxed);
+                    return;
+                }
+                start_index = end_index;
+            }
         }
     }
 
@@ -2021,9 +2054,11 @@ mod tests {
             expected_units
         );
         assert!(!migrator.overflowed.load(Ordering::Relaxed));
+        // Status is not modified by prepare_retry_after_overflow; the caller
+        // (perform_migration) stores 0 after driving the retry to completion.
         assert_eq!(
             migrator.status.load(Ordering::Acquire),
-            Migrator::<u64, u64>::INITIALIZATION_MASK
+            Migrator::<u64, u64>::INITIALIZATION_MASK | 1,
         );
         assert_ne!(new_dst, overflowed_dst);
 
